@@ -3,12 +3,13 @@
 #include <functional>
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace RemoteControl::Setup {
 using Progress=std::function<void(unsigned,const std::wstring&)>;
 struct Snapshot {
     bool installed=false,running=false,driverOwned=false,driverPresent=false;
-    bool restartRequired=false,internet=true,removableDriver=false,removalPending=false;
+    bool restartRequired=false,internet=false,removableDriver=false,removalPending=false;
     bool noCode=false,requireApproval=true;
     std::wstring status,detail,connectionCode;
 };
@@ -20,6 +21,8 @@ struct Result {
 bool OwnedLeaf(const std::wstring&) noexcept;
 std::wstring Quote(const std::wstring&);
 bool ServiceImageMatches(const std::wstring& command,const std::wstring& executable) noexcept;
+struct FirewallSpec {std::wstring name,application,description,ports,remoteAddresses;long protocol=0,profiles=0;};
+std::vector<FirewallSpec> FirewallPlan(bool internet,bool discovery,uint16_t port=48789);
 Snapshot Inspect(bool includeConnectionCode=true);
 // Unspecified access options preserve an existing host's settings on repair.
 Result Install(bool internet,const Progress& progress={},std::optional<bool> noCode={},std::optional<bool> requireApproval={});

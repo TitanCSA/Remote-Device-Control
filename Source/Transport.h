@@ -33,6 +33,7 @@ public:
     explicit Identity(const std::vector<uint8_t>& protectedPfxPlaintext);
     std::vector<uint8_t> Export() const;
     std::string Fingerprint() const;
+    std::string CertificatePem() const;
 };
 class Channel {
     struct State; std::unique_ptr<State> state_;
@@ -44,6 +45,10 @@ public:
     explicit Channel(std::unique_ptr<ByteStream> stream);
     void HandshakeServer(Identity& server);
     void HandshakeClient(std::string_view expectedSha256);
+    void HandshakeClient(std::string_view expectedSha256,Identity& clientIdentity);
+    // First-contact inspection only: no application bytes may be sent on this
+    // channel, and it is closed before the observed certificate is returned.
+    std::string ProbeServerCertificate();
     Channel(SOCKET socket,Identity& server);
     Channel(SOCKET socket,std::string_view expectedSha256);
     ~Channel(); Channel(const Channel&)=delete;
@@ -54,7 +59,7 @@ public:
     void Close() noexcept;
 };
 SOCKET Listen(std::string_view numericIPv4,uint16_t port,uint16_t* actualPort=nullptr);
-SOCKET Connect(std::string_view numericIPv4,uint16_t port);
+SOCKET Connect(std::string_view host,uint16_t port);
 std::string RandomSecret(); // 128 random bits, hex; never logged by the SDK.
 bool IsFingerprint(std::string_view value) noexcept;
 bool IsSecret(std::string_view value) noexcept;

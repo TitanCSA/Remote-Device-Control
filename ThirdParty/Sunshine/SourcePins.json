@@ -1,0 +1,10 @@
+{
+  "sunshine": {"url":"https://github.com/LizardByte/Sunshine.git","commit":"86188d47a7463b0f73b35de18a628353adeaa20e","tag":"v2025.924.154138"},
+  "codec_dist": {"url":"https://github.com/LizardByte/build-deps.git","commit":"c38829d6b8c35b64b3ff7a569f51978ed72c4292"},
+  "codec_source": {"url":"https://github.com/LizardByte/build-deps.git","commit":"2851db101eeddae8f02489d48a52a4d83e6f7e7b"},
+  "libiconv_recipe": {"url":"https://github.com/msys2/MINGW-packages.git","commit":"f89ccd3564cceff9ed46d778c91f278381393c75","directory":"mingw-w64-libiconv"},
+  "libiconv_source": {"url":"https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.18.tar.gz","sha256":"3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8"},
+  "boost": {"url":"https://github.com/boostorg/boost/releases/download/boost-1.87.0/boost-1.87.0-cmake.tar.xz","sha256":"7da75f171837577a52bbf217e17f8ea576c7c246e4594d617bfde7fafd408be5"},
+  "json": {"url":"https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz","sha256":"d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d","upstream_md5":"c23a33f04786d85c29fda8d16b5f0efd"},
+  "security_backports": ["888a6bb0cbdab97afb3df712f85f19c09dccd367","82bccdf69894ee03ac422cc787f1ac9654da359d","1583e7c4a7e99538c7700315a1d2a2101c6d2812"]
+}

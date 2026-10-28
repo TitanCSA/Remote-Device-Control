@@ -2,7 +2,7 @@ Vdevice demo driver — binary distribution terms
 Copyright (c) 2026 TitanCSA. All rights reserved.
 
 These terms cover the prebuilt Vdevice kernel driver, INF and signed catalog.
-The MIT source license does not grant rights to the kernel source code or the
+Application/source licenses do not grant rights to the Vdevice kernel source or the
 unrestricted edition. Third-party source notices remain applicable separately.
 
 You may install and use this demo, and redistribute complete, unmodified demo

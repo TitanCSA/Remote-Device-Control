@@ -2,6 +2,7 @@
 #include "Setup.h"
 #include "Config.h"
 #include "Protocol.h"
+#include "EngineBundle.h"
 #include "../Vdevice/Vdevice.h"
 #include <windows.h>
 #include <setupapi.h>
@@ -77,7 +78,7 @@ void OwnDirectory(const std::wstring& directory){
     ProtectDirectory(directory);Protected(directory);WriteAtomic(Join(directory,Marker),Bytes(MarkerBytes));
 }
 bool PendingRemoval(){const auto path=Join(ProgramDirectory(),Pending);return Exists(path)&&ReadFile(path,128)==Bytes(PendingBytes);}
-std::vector<uint8_t> Resource(unsigned id){const auto module=GetModuleHandleW(nullptr);HRSRC found=FindResourceW(module,MAKEINTRESOURCEW(id),RT_RCDATA);Require(found!=nullptr,"Find embedded setup payload");const auto size=SizeofResource(module,found);if(size<2||size>32*1024*1024)throw std::runtime_error("Embedded setup payload size is invalid.");auto loaded=LoadResource(module,found);Require(loaded!=nullptr,"Load embedded setup payload");const auto bytes=static_cast<const uint8_t*>(LockResource(loaded));if(!bytes||bytes[0]!='M'||bytes[1]!='Z')throw std::runtime_error("Embedded setup executable is invalid.");return {bytes,bytes+size};}
+std::vector<uint8_t> Resource(unsigned id){const auto module=GetModuleHandleW(nullptr);HRSRC found=FindResourceW(module,MAKEINTRESOURCEW(id),RT_RCDATA);Require(found!=nullptr,"Find embedded setup payload");const auto size=SizeofResource(module,found);const DWORD limit=id==304?256u*1024*1024:id==305?1024u*1024:32u*1024*1024;if(size<2||size>limit)throw std::runtime_error("Embedded setup payload size is invalid.");auto loaded=LoadResource(module,found);Require(loaded!=nullptr,"Load embedded setup payload");const auto bytes=static_cast<const uint8_t*>(LockResource(loaded));if(!bytes||(id<=303&&(bytes[0]!='M'||bytes[1]!='Z')))throw std::runtime_error("Embedded setup executable is invalid.");return {bytes,bytes+size};}
 struct Lock {Handle handle;Lock(){PSECURITY_DESCRIPTOR descriptor=nullptr;Require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",SDDL_REVISION_1,&descriptor,nullptr)!=FALSE,"Protect installation lock");SECURITY_ATTRIBUTES attributes{sizeof(attributes),descriptor,FALSE};handle.value=CreateMutexW(&attributes,FALSE,L"Global\\RemoteDeviceControlSetup");const auto error=GetLastError();LocalFree(descriptor);if(!handle.value)throw std::runtime_error(WindowsError("Create installation lock",error));const auto wait=WaitForSingleObject(handle.value,0);if(wait!=WAIT_OBJECT_0&&wait!=WAIT_ABANDONED)throw std::runtime_error("Another Remote Device Control setup is active.");}~Lock(){if(handle.value)ReleaseMutex(handle.value);}};
 void Administrator(){SID_IDENTIFIER_AUTHORITY nt=SECURITY_NT_AUTHORITY;PSID sid=nullptr;Require(AllocateAndInitializeSid(&nt,2,SECURITY_BUILTIN_DOMAIN_RID,DOMAIN_ALIAS_RID_ADMINS,0,0,0,0,0,0,&sid)!=FALSE,"Read administrative membership");BOOL member=FALSE;const BOOL checked=CheckTokenMembership(nullptr,sid,&member);FreeSid(sid);if(!checked||!member)throw std::runtime_error("Run this installer as administrator.");}
 struct ServiceState{bool exists=false,running=false,pendingDelete=false;};
@@ -114,26 +115,36 @@ void StartService(){
     if(!::StartServiceW(service.value,0,nullptr)&&GetLastError()!=ERROR_SERVICE_ALREADY_RUNNING)throw std::runtime_error(WindowsError("Start remote host service",GetLastError()));
     const auto begin=GetTickCount64();for(;;){SERVICE_STATUS_PROCESS current{};DWORD needed=0;Require(QueryServiceStatusEx(service.value,SC_STATUS_PROCESS_INFO,reinterpret_cast<BYTE*>(&current),sizeof(current),&needed)!=FALSE,"Verify host service startup");if(current.dwCurrentState==SERVICE_RUNNING)break;if(current.dwCurrentState==SERVICE_STOPPED)throw std::runtime_error("Host service stopped during startup (Windows "+std::to_string(current.dwWin32ExitCode)+").");if(GetTickCount64()-begin>15000)throw std::runtime_error("Host service did not report Running within 15 seconds. Review Windows service status and retry repair.");Sleep(50);}
 }
-bool FirewallOwned(INetFwRule* rule,bool discovery){
-    BSTR app=nullptr,group=nullptr,description=nullptr,remote=nullptr,ports=nullptr;long protocol=0,profiles=0;NET_FW_RULE_DIRECTION direction{};
-    HRESULT result=rule->get_ApplicationName(&app);result=SUCCEEDED(result)?rule->get_Grouping(&group):result;result=SUCCEEDED(result)?rule->get_Description(&description):result;result=SUCCEEDED(result)?rule->get_RemoteAddresses(&remote):result;result=SUCCEEDED(result)?rule->get_LocalPorts(&ports):result;result=SUCCEEDED(result)?rule->get_Protocol(&protocol):result;result=SUCCEEDED(result)?rule->get_Profiles(&profiles):result;result=SUCCEEDED(result)?rule->get_Direction(&direction):result;
-    const bool owned=SUCCEEDED(result)&&app&&group&&description&&remote&&ports&&Lower(app)==Lower(Join(ProgramDirectory(),HostExe))&&std::wstring(group)==FirewallGroup&&std::wstring(description)==(discovery?DiscoveryFirewallDescription:FirewallDescription)&&_wcsicmp(remote,L"LocalSubnet")==0&&std::wstring(ports)==(discovery?L"48762":L"48761")&&protocol==(discovery?NET_FW_IP_PROTOCOL_UDP:NET_FW_IP_PROTOCOL_TCP)&&(profiles==NET_FW_PROFILE2_PRIVATE||profiles==LanProfiles)&&direction==NET_FW_RULE_DIR_IN;
-    SysFreeString(app);SysFreeString(group);SysFreeString(description);SysFreeString(remote);SysFreeString(ports);return owned;
+
+bool FirewallOwned(INetFwRule* rule,const FirewallSpec& spec){
+ BSTR app=nullptr,group=nullptr,description=nullptr,remote=nullptr,ports=nullptr;long protocol=0,profiles=0;NET_FW_RULE_DIRECTION direction{};
+ HRESULT result=rule->get_ApplicationName(&app);result=SUCCEEDED(result)?rule->get_Grouping(&group):result;result=SUCCEEDED(result)?rule->get_Description(&description):result;result=SUCCEEDED(result)?rule->get_RemoteAddresses(&remote):result;result=SUCCEEDED(result)?rule->get_LocalPorts(&ports):result;result=SUCCEEDED(result)?rule->get_Protocol(&protocol):result;result=SUCCEEDED(result)?rule->get_Profiles(&profiles):result;result=SUCCEEDED(result)?rule->get_Direction(&direction):result;
+ const bool privateRule=remote&&_wcsicmp(remote,L"LocalSubnet")==0&&(profiles==NET_FW_PROFILE2_PRIVATE||profiles==LanProfiles);
+ const bool publicRule=remote&&std::wstring(remote)==L"*"&&profiles==NET_FW_PROFILE2_ALL&&spec.name!=DiscoveryFirewallName&&spec.name!=FirewallName;
+ const bool owned=SUCCEEDED(result)&&app&&group&&description&&ports&&Lower(app)==Lower(spec.application)&&std::wstring(group)==FirewallGroup&&std::wstring(description)==spec.description&&std::wstring(ports)==spec.ports&&protocol==spec.protocol&&(privateRule||publicRule)&&direction==NET_FW_RULE_DIR_IN;
+ SysFreeString(app);SysFreeString(group);SysFreeString(description);SysFreeString(remote);SysFreeString(ports);return owned;
 }
-void FirewallRule(bool add,bool discovery){
-    Apartment apartment;Com<INetFwPolicy2> policy;Hr(CoCreateInstance(__uuidof(NetFwPolicy2),nullptr,CLSCTX_INPROC_SERVER,__uuidof(INetFwPolicy2),reinterpret_cast<void**>(policy.Put())),"Open Windows Firewall policy");Com<INetFwRules> rules;Hr(policy->get_Rules(rules.Put()),"Read Windows Firewall rules");Bstr name(discovery?DiscoveryFirewallName:FirewallName);Com<INetFwRule> existing;const auto found=rules->Item(name.value,existing.Put());
-    if(SUCCEEDED(found)){if(!FirewallOwned(existing.value,discovery))throw std::runtime_error("A firewall rule with this name is not owned by Remote Device Control; it was retained.");Hr(rules->Remove(name.value),"Remove owned firewall rule");}else if(found!=HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)&&found!=HRESULT_FROM_WIN32(ERROR_NOT_FOUND))Hr(found,"Inspect owned firewall rule");
-    if(!add)return;Com<INetFwRule> rule;Hr(CoCreateInstance(__uuidof(NetFwRule),nullptr,CLSCTX_INPROC_SERVER,__uuidof(INetFwRule),reinterpret_cast<void**>(rule.Put())),"Create private LAN firewall rule");
-    Bstr app(Join(ProgramDirectory(),HostExe)),group(FirewallGroup),description(discovery?DiscoveryFirewallDescription:FirewallDescription),port(discovery?L"48762":L"48761"),remote(L"LocalSubnet");
-    Hr(rule->put_Name(name.value),"Name private LAN firewall rule");Hr(rule->put_ApplicationName(app.value),"Bind firewall rule to owned host");Hr(rule->put_Grouping(group.value),"Group firewall rule");Hr(rule->put_Description(description.value),"Describe firewall rule");Hr(rule->put_Protocol(discovery?NET_FW_IP_PROTOCOL_UDP:NET_FW_IP_PROTOCOL_TCP),"Set firewall protocol");Hr(rule->put_LocalPorts(port.value),"Set firewall port");Hr(rule->put_RemoteAddresses(remote.value),"Restrict firewall rule to local subnet");Hr(rule->put_Profiles(LanProfiles),"Restrict firewall rule to private/domain network profiles");Hr(rule->put_Direction(NET_FW_RULE_DIR_IN),"Set firewall direction");Hr(rule->put_Action(NET_FW_ACTION_ALLOW),"Set firewall action");Hr(rule->put_Enabled(VARIANT_TRUE),"Enable private LAN firewall rule");Hr(rules->Add(rule.value),"Register private LAN firewall rule");
+void FirewallRule(bool add,const FirewallSpec& spec){
+ Apartment apartment;Com<INetFwPolicy2> policy;Hr(CoCreateInstance(__uuidof(NetFwPolicy2),nullptr,CLSCTX_INPROC_SERVER,__uuidof(INetFwPolicy2),reinterpret_cast<void**>(policy.Put())),"Open Windows Firewall policy");
+ Com<INetFwRules> rules;Hr(policy->get_Rules(rules.Put()),"Read Windows Firewall rules");Bstr name(spec.name);Com<INetFwRule> existing;const auto found=rules->Item(name.value,existing.Put());
+ if(SUCCEEDED(found)){if(!FirewallOwned(existing.value,spec))throw std::runtime_error("A firewall rule with this name is not owned by Remote Device Control; it was retained.");Hr(rules->Remove(name.value),"Remove owned firewall rule");}
+ else if(found!=HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)&&found!=HRESULT_FROM_WIN32(ERROR_NOT_FOUND))Hr(found,"Inspect owned firewall rule");
+ if(!add)return;
+ Com<INetFwRule> rule;Hr(CoCreateInstance(__uuidof(NetFwRule),nullptr,CLSCTX_INPROC_SERVER,__uuidof(INetFwRule),reinterpret_cast<void**>(rule.Put())),"Create scoped GameStream firewall rule");
+ Bstr app(spec.application),group(FirewallGroup),description(spec.description),ports(spec.ports),remote(spec.remoteAddresses);
+ Hr(rule->put_Name(name.value),"Name owned firewall rule");Hr(rule->put_ApplicationName(app.value),"Bind rule to owned application");Hr(rule->put_Grouping(group.value),"Group owned firewall rule");Hr(rule->put_Description(description.value),"Describe owned firewall rule");Hr(rule->put_Protocol(spec.protocol),"Set firewall protocol");Hr(rule->put_LocalPorts(ports.value),"Set streaming ports");Hr(rule->put_RemoteAddresses(remote.value),"Set selected network scope");Hr(rule->put_Profiles(spec.profiles),"Set selected network profiles");Hr(rule->put_Direction(NET_FW_RULE_DIR_IN),"Set firewall direction");Hr(rule->put_Action(NET_FW_ACTION_ALLOW),"Set firewall action");Hr(rule->put_Enabled(VARIANT_TRUE),"Enable owned firewall rule");Hr(rules->Add(rule.value),"Register scoped firewall rule");
 }
-void Firewall(bool add,bool discovery=false){FirewallRule(add,false);FirewallRule(add&&discovery,true);}
+void Firewall(bool add,bool discovery=false,bool internet=false,uint16_t port=48789){
+ FirewallSpec legacy{FirewallName,Join(ProgramDirectory(),HostExe),FirewallDescription,L"48761",L"LocalSubnet",NET_FW_IP_PROTOCOL_TCP,LanProfiles};
+ FirewallRule(false,legacy);
+ for(const auto& spec:FirewallPlan(internet,true,port))FirewallRule(add&&(spec.name!=DiscoveryFirewallName||discovery),spec);
+}
 std::wstring ReadReg(HKEY root,const wchar_t* key,const wchar_t* name){DWORD bytes=0;auto result=RegGetValueW(root,key,name,RRF_RT_REG_SZ,nullptr,nullptr,&bytes);if(result==ERROR_FILE_NOT_FOUND||result==ERROR_PATH_NOT_FOUND)return {};if(result!=ERROR_SUCCESS||bytes>65536)throw std::runtime_error("Invalid application registration.");std::vector<wchar_t> value(bytes/sizeof(wchar_t)+1);result=RegGetValueW(root,key,name,RRF_RT_REG_SZ,nullptr,value.data(),&bytes);if(result!=ERROR_SUCCESS)throw std::runtime_error(WindowsError("Read application registration",result));return value.data();}
 void Apps(bool add){
     const auto command=Quote(Join(ProgramDirectory(),SetupExe))+L" --remove-ui";const auto existing=ReadReg(HKEY_LOCAL_MACHINE,AppKey,L"UninstallString");if(!existing.empty()&&existing!=command)throw std::runtime_error("The existing application uninstall entry is not owned by this installation.");
     if(!add){const auto result=RegDeleteTreeW(HKEY_LOCAL_MACHINE,AppKey);if(result!=ERROR_SUCCESS&&result!=ERROR_FILE_NOT_FOUND&&result!=ERROR_PATH_NOT_FOUND)throw std::runtime_error(WindowsError("Remove application registration",result));return;}
     HKEY key=nullptr;const auto result=RegCreateKeyExW(HKEY_LOCAL_MACHINE,AppKey,0,nullptr,0,KEY_SET_VALUE,nullptr,&key,nullptr);if(result!=ERROR_SUCCESS)throw std::runtime_error(WindowsError("Register Windows Apps entry",result));struct Close{HKEY key;~Close(){RegCloseKey(key);}} closer{key};
-    for(const auto& pair:std::vector<std::pair<std::wstring,std::wstring>>{{L"DisplayName",ProductName},{L"DisplayVersion",L"0.2.1"},{L"Publisher",L"TitanCSA"},{L"UninstallString",command},{L"InstallLocation",ProgramDirectory()},{L"DisplayIcon",Join(ProgramDirectory(),HostExe)},{L"URLInfoAbout",L"https://github.com/TitanCSA/Remote-Device-Control"}}){const auto error=RegSetValueExW(key,pair.first.c_str(),0,REG_SZ,reinterpret_cast<const BYTE*>(pair.second.c_str()),static_cast<DWORD>((pair.second.size()+1)*sizeof(wchar_t)));if(error!=ERROR_SUCCESS)throw std::runtime_error(WindowsError("Write Windows Apps entry",error));}
+    for(const auto& pair:std::vector<std::pair<std::wstring,std::wstring>>{{L"DisplayName",ProductName},{L"DisplayVersion",L"0.3.0"},{L"Publisher",L"TitanCSA"},{L"UninstallString",command},{L"InstallLocation",ProgramDirectory()},{L"DisplayIcon",Join(ProgramDirectory(),HostExe)},{L"URLInfoAbout",L"https://github.com/TitanCSA/Remote-Device-Control"}}){const auto error=RegSetValueExW(key,pair.first.c_str(),0,REG_SZ,reinterpret_cast<const BYTE*>(pair.second.c_str()),static_cast<DWORD>((pair.second.size()+1)*sizeof(wchar_t)));if(error!=ERROR_SUCCESS)throw std::runtime_error(WindowsError("Write Windows Apps entry",error));}
     DWORD one=1;for(const wchar_t* field:{L"NoModify",L"NoRepair"}){const auto error=RegSetValueExW(key,field,0,REG_DWORD,reinterpret_cast<const BYTE*>(&one),sizeof(one));if(error!=ERROR_SUCCESS)throw std::runtime_error(WindowsError("Write Apps settings",error));}
 }
 struct ChildResult{DWORD code=0;std::wstring output;};
@@ -201,13 +212,15 @@ bool ClockRegistration(std::wstring& verifiedPath,bool remove){
 }
 bool RestartFlag(){DWORD flag=0,bytes=sizeof(flag);return RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\TitanCSA\\Vdevice\\Setup\\BootSession",L"RestartRequired",RRF_RT_REG_DWORD,nullptr,&flag,&bytes)==ERROR_SUCCESS&&flag!=0;}
 bool RemoveFile(const std::wstring& path){if(!Exists(path))return false;(void)ReadFile(path,32*1024*1024);if(DeleteFileW(path.c_str()))return false;const auto error=GetLastError();if(error!=ERROR_ACCESS_DENIED&&error!=ERROR_SHARING_VIOLATION)throw std::runtime_error(WindowsError("Remove owned installation file",error));Require(MoveFileExW(path.c_str(),nullptr,MOVEFILE_DELAY_UNTIL_REBOOT)!=FALSE,"Schedule locked owned file removal after restart");return true;}
-bool RemoveOwnedDirectory(const std::wstring& path,std::wstring& retained){
+bool RemoveOwnedDirectory(const std::wstring& path,std::wstring& retained,bool scheduledChildren=false){
     if(!Exists(path))return false;Protected(path);if(::RemoveDirectoryW(path.c_str()))return false;const auto error=GetLastError();
     if(error==ERROR_DIR_NOT_EMPTY){
         bool onlyScheduledFiles=true;const bool program=Lower(path)==Lower(ProgramDirectory());
         for(const auto& entry:std::filesystem::directory_iterator(path)){
             const auto leaf=entry.path().filename().wstring();const auto attr=GetFileAttributesW(entry.path().c_str());bool known=false;
             if(program){for(const auto* name:ProgramFiles)if(leaf==name)known=true;}else{for(const auto* name:StateFiles)if(leaf==name)known=true;}
+            const bool child=scheduledChildren&&(program?(leaf==L"Engine"||leaf==L"Engine.new"||leaf==L"Engine.old"):leaf==L"Sunshine");
+            if(child&&attr!=INVALID_FILE_ATTRIBUTES&&(attr&FILE_ATTRIBUTE_DIRECTORY)&&!(attr&FILE_ATTRIBUTE_REPARSE_POINT)){Protected(entry.path().wstring());continue;}
             if(!known||attr==INVALID_FILE_ATTRIBUTES||(attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))){onlyScheduledFiles=false;retained+=L"\nUnexpected file retained: "+entry.path().wstring();}
         }
         // Every known remaining file has already been scheduled above; append
@@ -216,6 +229,45 @@ bool RemoveOwnedDirectory(const std::wstring& path,std::wstring& retained){
     }
     if(error==ERROR_ACCESS_DENIED||error==ERROR_SHARING_VIOLATION){Require(MoveFileExW(path.c_str(),nullptr,MOVEFILE_DELAY_UNTIL_REBOOT)!=FALSE,"Schedule owned directory removal");return true;}throw std::runtime_error(WindowsError("Remove empty owned directory",error));
 }
+bool RemoveEngineState(std::wstring& retained){
+ const auto root=EngineStateDirectory();if(!Exists(root))return false;
+ constexpr wchar_t stateMarker[]=L".rdc-state-owner.txt";
+ constexpr char stateOwner[]="RDC-OWNED-STATE-1\n";
+ Protected(root);if(!Exists(Join(root,stateMarker))||ReadFile(Join(root,stateMarker),128)!=Bytes(stateOwner)){retained+=L"\nUnrecognized engine state retained: "+root;return false;}
+ const std::array<const wchar_t*,8> known{L"sunshine.conf",L"apps.json",L"pairing-state.json",L"stream-status.json",L"stream-status.json.tmp",L"sunshine.log",L"bootstrap.log",L"disabled-web-credentials.json"};
+ const std::array<const wchar_t*,2> certificates{L"cakey.pem",L"cacert.pem"};
+ bool unexpected=false,restart=false;const auto credentials=Join(root,L"credentials");
+ for(const auto& item:std::filesystem::directory_iterator(root)){
+  const auto leaf=item.path().filename().wstring();const auto attr=GetFileAttributesW(item.path().c_str());bool recognized=Lower(leaf)==Lower(stateMarker);
+  for(const auto* name:known)if(Lower(leaf)==Lower(name))recognized=true;
+  if(leaf==L"credentials"&&attr!=INVALID_FILE_ATTRIBUTES&&(attr&FILE_ATTRIBUTE_DIRECTORY)&&!(attr&FILE_ATTRIBUTE_REPARSE_POINT))recognized=true;
+  if(!recognized||attr==INVALID_FILE_ATTRIBUTES||(attr&FILE_ATTRIBUTE_REPARSE_POINT))unexpected=true;
+ }
+ if(Exists(credentials)){
+  Protected(credentials);
+  for(const auto& item:std::filesystem::directory_iterator(credentials)){bool recognized=false;for(const auto* name:certificates)if(Lower(item.path().filename().wstring())==Lower(name))recognized=true;const auto attr=GetFileAttributesW(item.path().c_str());if(!recognized||attr==INVALID_FILE_ATTRIBUTES||(attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))unexpected=true;}
+ }
+ const auto removeFile=[&](const std::wstring& path){try{restart=RemoveFile(path)||restart;}catch(const std::exception& error){unexpected=true;retained+=L"\nEngine state file retained: "+path+L" ("+Wide(error.what())+L")";}};
+ for(const auto* name:known)removeFile(Join(root,name));
+ for(const auto* name:certificates)removeFile(Join(credentials,name));
+ const auto removeDirectory=[&](const std::wstring& path){if(!Exists(path))return;if(::RemoveDirectoryW(path.c_str()))return;const auto error=GetLastError();if(restart&&!unexpected&&(error==ERROR_DIR_NOT_EMPTY||error==ERROR_SHARING_VIOLATION||error==ERROR_ACCESS_DENIED)){Require(MoveFileExW(path.c_str(),nullptr,MOVEFILE_DELAY_UNTIL_REBOOT)!=FALSE,"Schedule owned engine state directory removal");restart=true;}else{unexpected=true;retained+=L"\nEngine state directory retained: "+path;}};
+ removeDirectory(credentials);
+ if(unexpected){retained+=L"\nUnexpected engine state retained with its ownership marker: "+root;return restart;}
+ removeFile(Join(root,stateMarker));removeDirectory(root);return restart;
+}
+
+}
+
+std::vector<FirewallSpec> FirewallPlan(bool internet,bool discovery,uint16_t port){
+ if(port<1024||port>65514)throw std::invalid_argument("GameStream base port must be1024..65514.");
+ const auto engine=RemoteControl::EngineDirectory()+L"\\sunshine.exe";
+ const long profiles=internet?NET_FW_PROFILE2_ALL:LanProfiles;const std::wstring remote=internet?L"*":L"LocalSubnet";
+ std::vector<FirewallSpec> plan{
+  {L"Remote Device Control - GameStream TCP",engine,L"Remote Device Control engine (owned GameStream TCP rule)",std::to_wstring(port-5)+L","+std::to_wstring(port)+L","+std::to_wstring(port+21),remote,NET_FW_IP_PROTOCOL_TCP,profiles},
+  {L"Remote Device Control - GameStream UDP",engine,L"Remote Device Control engine (owned GameStream UDP rule)",std::to_wstring(port+9)+L","+std::to_wstring(port+10)+L","+std::to_wstring(port+11)+L","+std::to_wstring(port+13),remote,NET_FW_IP_PROTOCOL_UDP,profiles}
+ };
+ if(discovery)plan.push_back({DiscoveryFirewallName,Join(ProgramDirectory(),HostExe),DiscoveryFirewallDescription,L"48762",L"LocalSubnet",NET_FW_IP_PROTOCOL_UDP,LanProfiles});
+ return plan;
 }
 bool OwnedLeaf(const std::wstring& leaf) noexcept {for(const auto* name:ProgramFiles)if(leaf==name)return true;for(const auto* name:StateFiles)if(leaf==name)return true;return false;}
 std::wstring Quote(const std::wstring& value){if(value.find_first_of(L"\"\r\n\0",0,4)!=std::wstring::npos||value.empty()||value.back()==L'\\')throw std::invalid_argument("Unsafe installation command argument.");return L"\""+value+L"\"";}
@@ -226,39 +278,40 @@ Snapshot Inspect(bool includeConnectionCode){
         snapshot.installed=program||state||service.exists;snapshot.running=service.running;snapshot.driverPresent=VdevicePresent();snapshot.restartRequired=RestartFlag()||service.pendingDelete;
         if(program){snapshot.removalPending=PendingRemoval();snapshot.driverOwned=snapshot.removalPending;}
         if(state&&Exists(Join(StateDirectory(),L"host.bin"))){const auto config=LoadConfig();snapshot.internet=config.internet;snapshot.driverOwned=config.driverOwned;snapshot.removableDriver=config.driverOwned;snapshot.noCode=config.noCode;snapshot.requireApproval=config.requireApproval;
-            if(includeConnectionCode&&!snapshot.removalPending){TitanTransport::Identity identity(config.identity);snapshot.connectionCode=PairingCode(config,identity.Fingerprint());}}
+            if(includeConnectionCode&&!snapshot.removalPending&&snapshot.running){try{snapshot.connectionCode=PairingCode(config,EngineFingerprint());}catch(const std::exception& error){snapshot.detail=L"Direct engine certificate is not ready: "+Wide(error.what());}}}
         snapshot.removableDriver=snapshot.driverOwned;snapshot.status=snapshot.removalPending?L"Removal pending restart / final cleanup":snapshot.running?L"Host service running":snapshot.installed?L"Installed — service stopped":L"Not installed";
-        snapshot.detail=snapshot.removalPending?L"Restart Windows, reopen this installer and choose Uninstall to finish the owned driver-package cleanup.":snapshot.running?L"Starts with Windows. Keep the connection code private. Remote control requires an authenticated peer and the signed-in console desktop.":L"Install the Vdevice demo and one automatic host service. No separate controller installation is required.";
-        if(snapshot.running&&snapshot.noCode){snapshot.detail=L"Public access enabled: visible in nearby lists"+std::wstring(snapshot.internet?L" and the public Internet directory.":L" on this private local network.")+(snapshot.requireApproval?L" Each new connection requires approval on this PC.":L" Anyone listed can connect without a code or permission prompt.")+L" Control is limited to the signed-in console desktop.";}
+        const auto certificateDetail=snapshot.detail;snapshot.detail=snapshot.removalPending?L"Restart Windows, reopen this installer and choose Uninstall to finish the owned driver-package cleanup.":snapshot.running?L"Starts with Windows. Keep the connection code private. Remote control requires an authenticated peer and the signed-in console desktop.":L"Install the streaming engine, Vdevice demo and one automatic host service. The viewer stays portable.";
+        if(snapshot.running&&snapshot.noCode){snapshot.detail=L"Code-free access enabled on this PC."+(snapshot.requireApproval?std::wstring(L" Each connection requires local approval."):std::wstring(L" Anyone able to reach this PC can connect without a code or prompt."))+L" Discovery is limited to the local network; Internet uses an explicit address.";}if(!certificateDetail.empty())snapshot.detail+=L" "+certificateDetail;if(snapshot.installed&&!EngineBundle::Present())snapshot.detail+=L" Streaming engine missing or incomplete; run Install / repair.";if(snapshot.internet)snapshot.detail+=L" Router UPnP mapping requested; Internet access requires a reachable address and compatible router.";
         if(snapshot.driverPresent){const auto info=Vdevice::Get_Info();if(!info)snapshot.detail+=L" Vdevice API: "+Wide(info.message)+L" (Windows "+std::to_wstring(info.error)+L").";else if(info.trial_expired)snapshot.detail+=L" The shared Vdevice demo has expired; restart Windows for another allowance.";else if(info.quiescing||info.removing){snapshot.restartRequired=true;snapshot.detail+=L" Vdevice is stopping; restart Windows if requested.";}}
     }catch(const std::exception& error){snapshot.status=L"Installation state needs attention";snapshot.detail=Wide(error.what());}return snapshot;
 }
 Result Install(bool internet,const Progress& progress,std::optional<bool> noCode,std::optional<bool> requireApproval){
     Result result;try{
-        Administrator();Lock lock;Notify(progress,5,L"Verifying embedded host, Vdevice installer and removal helper...");const auto driver=Resource(301),host=Resource(302),uninstaller=Resource(303);
+        Administrator();Lock lock;Notify(progress,5,L"Verifying embedded host, Vdevice installer and removal helper...");const auto driver=Resource(301),host=Resource(302),uninstaller=Resource(303),engine=Resource(304),engineManifest=Resource(305);EngineBundle::ValidateCabinet(engine,engineManifest);
         if(ServiceQuery(ServiceName,true).pendingDelete){result.code=3010;result.restartRequired=true;result.message=L"The previous host service is pending deletion. Restart Windows and run Install / repair again; no installation files were changed.";Notify(progress,100,result.message);return result;}
         const bool previousDriver=VdevicePresent();const bool previousConfig=Exists(StateDirectory())&&Exists(Join(StateDirectory(),L"host.bin"));
         OwnDirectory(ProgramDirectory());OwnDirectory(StateDirectory());StopService(progress,false);
-        Config config=previousConfig?LoadConfig():NewConfig();config.internet=internet;if(noCode.has_value())config.noCode=*noCode;if(requireApproval.has_value()){if(!config.noCode)throw std::runtime_error("Connection-approval options require public no-code access.");config.requireApproval=*requireApproval;}if(config.directoryOwner.empty())config.directoryOwner=TitanTransport::RandomSecret()+TitanTransport::RandomSecret();if(config.noCode)config.room=PublicRoom(config.directoryOwner);if(!previousDriver||PendingRemoval())config.driverOwned=true;SaveConfig(config);
+        Config config=previousConfig?LoadConfig():NewConfig();config.internet=internet;if(noCode.has_value())config.noCode=*noCode;if(requireApproval.has_value()){if(!config.noCode)throw std::runtime_error("Connection-approval options require public no-code access.");config.requireApproval=*requireApproval;}if(!previousDriver||PendingRemoval())config.driverOwned=true;SaveConfig(config);
         Notify(progress,20,L"Writing the protected host and the unchanged Vdevice demo installer...");WriteAtomic(Join(ProgramDirectory(),HostExe),host);WriteAtomic(Join(ProgramDirectory(),DriverExe),driver);
         // Use immutable bytes from the running full installer, never reopen a
         // potentially user-writable downloaded EXE path after elevation.
         WriteAtomic(Join(ProgramDirectory(),SetupExe),uninstaller);
         Apps(true);Notify(progress,35,previousDriver?(config.driverOwned?L"Repairing the Vdevice package owned by this host; removal remains optional at uninstall.":L"Checking/repairing the shared Vdevice installation; it will be preserved on host removal."):L"Installing the Microsoft-signed Vdevice demo package...");const auto installed=Driver(L"/install",progress);
         if(installed.code!=0&&installed.code!=3010)throw std::runtime_error("Vdevice installation failed (Windows "+std::to_string(installed.code)+"). "+Utf8(installed.output));
-        result.restartRequired=installed.code==3010;Notify(progress,75,L"Adding private-subnet LAN firewall rules and the automatic host service...");Firewall(true,config.noCode);StartService();
+        result.restartRequired=installed.code==3010;Notify(progress,65,L"Extracting and verifying the protected streaming engine...");result.restartRequired=EngineBundle::Install(engine,engineManifest)||result.restartRequired;
+        Notify(progress,80,config.internet?L"Adding direct streaming firewall rules (Internet explicitly enabled) and starting the host...":L"Adding private-subnet streaming firewall rules and starting the host...");Firewall(true,config.noCode,config.internet,config.port);StartService();
         if(Exists(Join(ProgramDirectory(),Pending)))result.restartRequired=RemoveFile(Join(ProgramDirectory(),Pending))||result.restartRequired;
         result.code=result.restartRequired?3010:0;result.message=result.restartRequired?L"Host installed. Restart Windows to finish the Vdevice operation.":L"Host installed and started.";
-        result.message+=config.noCode?(config.requireApproval?L" Public no-code access is enabled; each new connection requires approval on this PC.":L" Public no-code access is enabled. Anyone listed can connect without a code or permission prompt."):L" Share the private connection code only with the intended controller.";
-        result.message+=L" Vdevice's shared one-hour allowance begins when virtual devices are first created.";Notify(progress,100,result.message);
+        result.message+=config.noCode?(config.requireApproval?L" Public no-code access is enabled; each new connection requires approval on this PC.":L" Public no-code access is enabled. Anyone able to reach this PC can connect without a code or permission prompt."):L" Share the private connection code only with the intended controller.";
+        result.message+=config.internet?L" Internet is direct: UPnP is requested, or configure port forwarding/routable IPv6. No central relay or public directory is used.":L" Network access is restricted to the private/domain local subnet.";result.message+=L" Vdevice's shared one-hour allowance begins when virtual devices are first created.";Notify(progress,100,result.message);
     }catch(const std::exception& error){result.code=1;result.message=Wide(error.what());Notify(progress,100,L"Installation did not complete: "+result.message);}return result;
 }
 Result Uninstall(bool removeOwnedDriver,const Progress& progress){
     Result result;try{
         Administrator();Lock lock;const bool program=Marked(ProgramDirectory()),state=Marked(StateDirectory());if(!program&&!state){(void)ServiceQuery(ServiceName,true);result.message=L"No owned Remote Device Control installation was found.";return result;}
         if(!program)throw std::runtime_error("The owned program marker is missing; installation files were retained for review.");
-        bool owned=PendingRemoval();if(state&&Exists(Join(StateDirectory(),L"host.bin")))owned=LoadConfig().driverOwned;
-        Notify(progress,10,L"Stopping remote sessions, the host service and virtual input devices...");StopService(progress,true);result.restartRequired=ServiceQuery(ServiceName,true).pendingDelete;Notify(progress,25,L"Removing only this host's private LAN firewall rule...");Firewall(false);
+        bool owned=PendingRemoval();uint16_t port=48789;if(state&&Exists(Join(StateDirectory(),L"host.bin"))){const auto config=LoadConfig();owned=config.driverOwned;port=config.port;}
+        Notify(progress,10,L"Stopping remote sessions, the host service and virtual input devices...");StopService(progress,true);result.restartRequired=ServiceQuery(ServiceName,true).pendingDelete;Notify(progress,25,L"Removing only this host's streaming/discovery firewall rules...");Firewall(false,false,false,port);std::wstring engineRetained,stateRetained;const bool engineRestart=EngineBundle::Remove(engineRetained),stateRestart=RemoveEngineState(stateRetained);result.restartRequired=engineRestart||stateRestart||result.restartRequired;result.message+=engineRetained+stateRetained;
         bool pending=false;
         if(removeOwnedDriver&&owned){Notify(progress,40,L"Removing the Vdevice package installed by this host. Shared Vdevice applications may need it.");std::wstring verifiedClock;try{(void)ClockRegistration(verifiedClock,false);}catch(const std::exception& error){Notify(progress,42,L"Clock ownership preflight: "+Wide(error.what()));}
             const auto removed=Driver(L"/uninstall",progress);if(removed.code!=0&&removed.code!=3010)throw std::runtime_error("Vdevice removal failed (Windows "+std::to_string(removed.code)+"). "+Utf8(removed.output));result.restartRequired=result.restartRequired||removed.code==3010;
@@ -266,12 +319,12 @@ Result Uninstall(bool removeOwnedDriver,const Progress& progress){
         }
         Notify(progress,75,L"Removing owned configuration and application files; Windows audit/setup journals are preserved...");
         const auto roomKey=RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\TitanCSA\\RemoteDeviceControl");if(roomKey!=ERROR_SUCCESS&&roomKey!=ERROR_FILE_NOT_FOUND&&roomKey!=ERROR_PATH_NOT_FOUND)throw std::runtime_error(WindowsError("Remove owned local host identity",roomKey));
-        if(state){for(const auto* name:StateFiles)result.restartRequired=RemoveFile(Join(StateDirectory(),name))||result.restartRequired;result.restartRequired=RemoveOwnedDirectory(StateDirectory(),result.message)||result.restartRequired;}
+        if(state){for(const auto* name:StateFiles)result.restartRequired=RemoveFile(Join(StateDirectory(),name))||result.restartRequired;result.restartRequired=RemoveOwnedDirectory(StateDirectory(),result.message,stateRestart&&stateRetained.empty())||result.restartRequired;}
         if(pending){WriteAtomic(Join(ProgramDirectory(),Pending),Bytes(PendingBytes));result.restartRequired=RemoveFile(Join(ProgramDirectory(),HostExe))||result.restartRequired;Apps(true);result.restartRequired=true;result.message=L"Host service, remote access and configuration removed. Windows still retains the owned Vdevice package. Restart Windows, reopen this installer and choose Uninstall to finish cleanup."+result.message;}
-        else{Apps(false);for(const auto* name:ProgramFiles)result.restartRequired=RemoveFile(Join(ProgramDirectory(),name))||result.restartRequired;result.restartRequired=RemoveOwnedDirectory(ProgramDirectory(),result.message)||result.restartRequired;result.message=std::wstring(L"Remote host service, firewall rule, configuration, Apps entry and owned application files removed.")+(owned&&removeOwnedDriver?L" Vdevice removal requested.":L" Existing/shared Vdevice installation preserved.")+result.message;}
+        else{Apps(false);for(const auto* name:ProgramFiles)result.restartRequired=RemoveFile(Join(ProgramDirectory(),name))||result.restartRequired;result.restartRequired=RemoveOwnedDirectory(ProgramDirectory(),result.message,engineRestart&&engineRetained.empty())||result.restartRequired;result.message=std::wstring(L"Remote host service, firewall rule, configuration, Apps entry and owned application files removed.")+(owned&&removeOwnedDriver?L" Vdevice removal requested.":L" Existing/shared Vdevice installation preserved.")+result.message;}
         result.code=result.restartRequired?3010:0;if(result.restartRequired)result.message+=L"\nRestart Windows to release the resident demo clock and any locked package/files. Windows event and setup logs remain.";Notify(progress,100,result.message);
     }catch(const std::exception& error){result.code=1;result.message=L"Uninstall did not complete: "+Wide(error.what());Notify(progress,100,result.message);}return result;
 }
-void SelfTest(){const auto driver=Resource(301),host=Resource(302);if(driver.size()<4096||host.size()<4096||!OwnedLeaf(HostExe)||OwnedLeaf(L"..\\other.exe")||!ServiceImageMatches(L"\"C:\\Program Files\\TitanCSA\\RemoteDeviceControl\\RemoteDeviceHost.exe\" --service",L"C:\\Program Files\\TitanCSA\\RemoteDeviceControl\\RemoteDeviceHost.exe"))throw std::runtime_error("Offline setup/resource checks failed.");}
+void SelfTest(){if(FindResourceW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(304),RT_RCDATA))EngineBundle::ValidateCabinet(Resource(304),Resource(305));const auto driver=Resource(301),host=Resource(302);if(driver.size()<4096||host.size()<4096||!OwnedLeaf(HostExe)||OwnedLeaf(L"..\\other.exe")||!ServiceImageMatches(L"\"C:\\Program Files\\TitanCSA\\RemoteDeviceControl\\RemoteDeviceHost.exe\" --service",L"C:\\Program Files\\TitanCSA\\RemoteDeviceControl\\RemoteDeviceHost.exe"))throw std::runtime_error("Offline setup/resource checks failed.");}
 void RequestRestart(){HANDLE raw=nullptr;Require(OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&raw)!=FALSE,"Open restart privilege token");Handle token;token.value=raw;TOKEN_PRIVILEGES privileges{};privileges.PrivilegeCount=1;Require(LookupPrivilegeValueW(nullptr,SE_SHUTDOWN_NAME,&privileges.Privileges[0].Luid)!=FALSE,"Read restart privilege");privileges.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;SetLastError(ERROR_SUCCESS);Require(AdjustTokenPrivileges(token.value,FALSE,&privileges,0,nullptr,nullptr)!=FALSE&&GetLastError()==ERROR_SUCCESS,"Enable restart privilege");Require(ExitWindowsEx(EWX_REBOOT|EWX_RESTARTAPPS,SHTDN_REASON_MAJOR_APPLICATION|SHTDN_REASON_MINOR_INSTALLATION|SHTDN_REASON_FLAG_PLANNED)!=FALSE,"Restart Windows");}
 }

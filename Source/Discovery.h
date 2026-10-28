@@ -9,7 +9,7 @@ namespace RemoteControl {
 constexpr uint16_t DiscoveryPort=48762;
 struct DiscoveryAnnouncement {
     std::string name,room,pin;
-    uint16_t port=48761;
+    uint16_t port=48789;
     bool busy=false,available=false,requireApproval=true;
 };
 struct DiscoveredHost:DiscoveryAnnouncement {
@@ -17,7 +17,7 @@ struct DiscoveredHost:DiscoveryAnnouncement {
     uint64_t seenTick=0;
 };
 // Only public LAN metadata is advertised. No pairing secret, private code,
-// relay capability or credentials are carried by this protocol.
+// Internet directory or credentials are carried by this protocol.
 class DiscoveryResponder {
     struct State;std::unique_ptr<State> state_;
 public:

@@ -20,13 +20,10 @@ void Append(std::vector<uint8_t>& out,const std::string& text){uint32_t n=static
 std::string Take(const std::vector<uint8_t>& in,size_t& at,size_t max){if(at+4>in.size())throw std::runtime_error("Truncated host configuration.");uint32_t n=0;memcpy(&n,in.data()+at,4);at+=4;if(n>max||n>in.size()-at)throw std::runtime_error("Invalid host configuration field.");std::string text(reinterpret_cast<const char*>(in.data()+at),n);at+=n;return text;}
 struct Wipe {std::vector<uint8_t>& bytes;~Wipe(){if(!bytes.empty())SecureZeroMemory(bytes.data(),bytes.size());}};
 uint16_t Port(const std::string& value){unsigned number=0;if(value.empty()||value.size()>5)throw std::runtime_error("Invalid host port.");for(const auto c:value){if(c<'0'||c>'9')throw std::runtime_error("Invalid host port.");number=number*10+static_cast<unsigned>(c-'0');}if(!number||number>65535)throw std::runtime_error("Invalid host port.");return static_cast<uint16_t>(number);}
-void ValidateConfig(const Config& c,bool legacy=false){
- const auto host=Utf8(c.host),relay=Utf8(c.relay);
- if(host.empty()||host.size()>255||host.find_first_of("/\\ ;\r\n\t\0",0,9)!=std::string::npos||relay.size()>512||relay.find_first_of(";\r\n\0",0,4)!=std::string::npos)throw std::runtime_error("Invalid host configuration address.");
- if(!c.port||!TitanTransport::IsSecret(c.secret)||c.secret==OpenAccessSecret||!TitanTransport::IsSecret(c.room)||!TitanTransport::IsFingerprint(c.relayToken))throw std::runtime_error("Invalid host credentials.");
- if((!legacy||!c.directoryOwner.empty())&&!TitanTransport::IsFingerprint(c.directoryOwner))throw std::runtime_error("Invalid private directory-owner credentials.");
- if(c.noCode&&(legacy||c.room!=PublicRoom(c.directoryOwner)))throw std::runtime_error("Public host room does not match its private directory owner.");
- if(c.identity.empty()||c.identity.size()>65536)throw std::runtime_error("Invalid host identity length.");
+void ValidateConfig(const Config& c){
+ const auto host=Utf8(c.host);
+ if(host.empty()||host.size()>255||host.find_first_of("/\\ ;\r\n\t\0",0,9)!=std::string::npos)throw std::runtime_error("Invalid direct host address.");
+ if(c.port<1024||c.port>65514||!TitanTransport::IsSecret(c.secret)||c.secret==OpenAccessSecret||!TitanTransport::IsSecret(c.room))throw std::runtime_error("Invalid direct host configuration.");
 }
 bool TrustedParentWriter(PSID sid){
  if(IsWellKnownSid(sid,WinLocalSystemSid)||IsWellKnownSid(sid,WinBuiltinAdministratorsSid))return true;
@@ -44,15 +41,6 @@ std::wstring Wide(const std::string& value){if(value.empty())return {};int n=Mul
 std::string Utf8(const std::wstring& value){if(value.empty())return {};int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);if(!n)throw std::runtime_error("Invalid Unicode text.");std::string out(static_cast<size_t>(n),0);WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),out.data(),n,nullptr,nullptr);return out;}
 std::wstring ProgramDirectory(){return Folder(FOLDERID_ProgramFiles)+L"\\TitanCSA\\RemoteDeviceControl";}
 std::wstring StateDirectory(){return Folder(FOLDERID_ProgramData)+L"\\TitanCSA\\RemoteDeviceControl";}
-std::string PublicRoom(std::string_view owner){
- if(!TitanTransport::IsFingerprint(owner))throw std::invalid_argument("The private directory owner must contain 64 lowercase hexadecimal characters.");
- BCRYPT_HASH_HANDLE hash=nullptr;auto status=BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE,&hash,nullptr,0,nullptr,0,0);
- if(status<0)throw std::runtime_error(WindowsError("Create public-room SHA-256",static_cast<uint32_t>(status)));
- struct Destroy{BCRYPT_HASH_HANDLE value;~Destroy(){BCryptDestroyHash(value);}} destroy{hash};
- status=BCryptHashData(hash,reinterpret_cast<PUCHAR>(const_cast<char*>(owner.data())),static_cast<ULONG>(owner.size()),0);if(status<0)throw std::runtime_error(WindowsError("Hash private directory owner",static_cast<uint32_t>(status)));
- unsigned char digest[32]{};status=BCryptFinishHash(hash,digest,sizeof(digest),0);if(status<0)throw std::runtime_error(WindowsError("Finish public-room SHA-256",static_cast<uint32_t>(status)));
- static constexpr char hex[]="0123456789abcdef";std::string room(32,'0');for(size_t i=0;i<16;++i){room[i*2]=hex[digest[i]>>4];room[i*2+1]=hex[digest[i]&15];}return room;
-}
 void CheckPlain(const std::wstring& path,bool directory){
  std::filesystem::path p(path);for(auto current=p;!current.empty()&&current!=current.root_path();current=current.parent_path()){
   DWORD attr=GetFileAttributesW(current.c_str());if(attr==INVALID_FILE_ATTRIBUTES)throw std::runtime_error(WindowsError("Inspect owned path",GetLastError()));if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw std::runtime_error("Redirected installation/configuration paths are refused.");
@@ -82,20 +70,23 @@ void ProtectDirectory(const std::wstring& path){
 Config NewConfig(){Config c;
  ULONG size=16384;std::vector<uint8_t> addresses(size);ULONG status=GetAdaptersAddresses(AF_INET,GAA_FLAG_INCLUDE_GATEWAYS,nullptr,reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()),&size);if(status==ERROR_BUFFER_OVERFLOW&&size<1024*1024){addresses.resize(size);status=GetAdaptersAddresses(AF_INET,GAA_FLAG_INCLUDE_GATEWAYS,nullptr,reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()),&size);}
  if(status==NO_ERROR){for(auto adapter=reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data());adapter;adapter=adapter->Next){if(adapter->OperStatus!=IfOperStatusUp||!adapter->FirstGatewayAddress||(adapter->IfType!=IF_TYPE_ETHERNET_CSMACD&&adapter->IfType!=IF_TYPE_IEEE80211))continue;for(auto address=adapter->FirstUnicastAddress;address;address=address->Next){if(address->Address.lpSockaddr->sa_family!=AF_INET)continue;wchar_t text[INET_ADDRSTRLEN]{};auto ip=reinterpret_cast<sockaddr_in*>(address->Address.lpSockaddr);if(InetNtopW(AF_INET,&ip->sin_addr,text,INET_ADDRSTRLEN)){c.host=text;break;}}if(c.host!=L"127.0.0.1")break;}}
- c.secret=TitanTransport::RandomSecret();c.directoryOwner=TitanTransport::RandomSecret()+TitanTransport::RandomSecret();c.room=PublicRoom(c.directoryOwner);c.relayToken=TitanTransport::RandomSecret()+TitanTransport::RandomSecret();TitanTransport::Identity identity;c.identity=identity.Export();return c;}
+ c.secret=TitanTransport::RandomSecret();c.room=TitanTransport::RandomSecret();return c;}
 namespace ConfigFormat {
 std::vector<uint8_t> Encode(const Config& c){
- ValidateConfig(c);std::vector<uint8_t> raw{'R','D','C','2'};Append(raw,Utf8(c.host));Append(raw,Utf8(c.relay));Append(raw,std::to_string(c.port));Append(raw,c.secret);Append(raw,c.room);Append(raw,c.relayToken);Append(raw,c.directoryOwner);
- raw.push_back(c.internet?1:0);raw.push_back(c.driverOwned?1:0);raw.push_back(c.noCode?1:0);raw.push_back(c.requireApproval?1:0);
- const auto length=static_cast<uint32_t>(c.identity.size());const auto bytes=reinterpret_cast<const uint8_t*>(&length);raw.insert(raw.end(),bytes,bytes+4);raw.insert(raw.end(),c.identity.begin(),c.identity.end());return raw;
+ ValidateConfig(c);std::vector<uint8_t> raw{'R','D','C','3'};Append(raw,Utf8(c.host));Append(raw,std::to_string(c.port));Append(raw,c.secret);Append(raw,c.room);
+ raw.push_back(c.internet?1:0);raw.push_back(c.driverOwned?1:0);raw.push_back(c.noCode?1:0);raw.push_back(c.requireApproval?1:0);return raw;
 }
 Config Decode(const std::vector<uint8_t>& raw){
- if(raw.size()<4||raw.size()>131072||(memcmp(raw.data(),"RDC1",4)&&memcmp(raw.data(),"RDC2",4)))throw std::runtime_error("Host configuration version is not supported.");
- const bool legacy=raw[3]=='1';size_t at=4;Config c;c.host=Wide(Take(raw,at,255));c.relay=Wide(Take(raw,at,512));c.port=Port(Take(raw,at,5));c.secret=Take(raw,at,32);c.room=Take(raw,at,32);c.relayToken=Take(raw,at,64);if(!legacy)c.directoryOwner=Take(raw,at,64);
- const size_t flags=legacy?2u:4u;if(raw.size()-at<=flags)throw std::runtime_error("Truncated host identity.");for(size_t i=0;i<flags;++i)if(raw[at+i]>1)throw std::runtime_error("Invalid host configuration flag.");
- c.internet=raw[at++]!=0;c.driverOwned=raw[at++]!=0;
- if(!legacy){c.noCode=raw[at++]!=0;c.requireApproval=raw[at++]!=0;if(raw.size()-at<4)throw std::runtime_error("Truncated host identity length.");uint32_t length=0;memcpy(&length,raw.data()+at,4);at+=4;if(length!=raw.size()-at)throw std::runtime_error("Invalid host identity length.");}
- c.identity.assign(raw.begin()+static_cast<ptrdiff_t>(at),raw.end());ValidateConfig(c,legacy);return c;
+ if(raw.size()<4||raw.size()>131072||(memcmp(raw.data(),"RDC1",4)&&memcmp(raw.data(),"RDC2",4)&&memcmp(raw.data(),"RDC3",4)))throw std::runtime_error("Host configuration version is not supported.");
+ const unsigned version=static_cast<unsigned>(raw[3]-'0');size_t at=4;Config c;c.host=Wide(Take(raw,at,255));
+ if(version<3){(void)Take(raw,at,512);(void)Port(Take(raw,at,5));c.secret=Take(raw,at,32);c.room=Take(raw,at,32);(void)Take(raw,at,64);if(version==2)(void)Take(raw,at,64);}
+ else{c.port=Port(Take(raw,at,5));c.secret=Take(raw,at,32);c.room=Take(raw,at,32);}
+ const size_t flags=version==1?2u:4u;if(raw.size()-at<flags)throw std::runtime_error("Truncated host settings.");for(size_t i=0;i<flags;++i)if(raw[at+i]>1)throw std::runtime_error("Invalid host configuration flag.");
+ const bool previousInternet=raw[at++]!=0;c.internet=version==3&&previousInternet;c.driverOwned=raw[at++]!=0;if(version>=2){c.noCode=raw[at++]!=0;c.requireApproval=raw[at++]!=0;}
+ if(version==3){if(at!=raw.size())throw std::runtime_error("Unexpected direct host configuration data.");}
+ else if(version==2){if(raw.size()-at<4)throw std::runtime_error("Truncated legacy identity length.");uint32_t count=0;memcpy(&count,raw.data()+at,4);at+=4;if(!count||count>65536||count!=raw.size()-at)throw std::runtime_error("Invalid legacy identity length.");}
+ else if(raw.size()==at||raw.size()-at>65536)throw std::runtime_error("Invalid legacy identity length.");
+ ValidateConfig(c);return c;
 }
 }
 void SaveConfig(const Config& c){
@@ -115,10 +106,26 @@ Config LoadConfig(){
  std::vector<uint8_t> raw(output.pbData,output.pbData+output.cbData);SecureZeroMemory(output.pbData,output.cbData);LocalFree(output.pbData);
  Wipe wipe{raw};return ConfigFormat::Decode(raw);
 }
-std::wstring PairingCode(const Config& c,const std::string& fingerprint){return L"RDC1;"+c.host+L";"+std::to_wstring(c.port)+L";"+Wide(fingerprint)+L";"+Wide(c.secret)+L";"+Wide(c.room)+L";"+Wide(c.relayToken)+L";"+(c.internet?c.relay:L"");}
+std::wstring EngineDirectory(){return ProgramDirectory()+L"\\Engine";}
+std::wstring EngineStateDirectory(){return StateDirectory()+L"\\Sunshine";}
+std::string EngineFingerprint(){
+ const auto path=EngineStateDirectory()+L"\\credentials\\cacert.pem";CheckPlain(path);const auto length=std::filesystem::file_size(path);if(!length||length>16384)throw std::runtime_error("The direct host certificate is unavailable.");
+ std::ifstream input(path,std::ios::binary);std::string pem((std::istreambuf_iterator<char>(input)),{});if(pem.size()!=length)throw std::runtime_error("The direct host certificate could not be read completely.");
+ DWORD count=0;Require(CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,nullptr,&count,nullptr,nullptr)!=FALSE,"Read engine certificate");if(!count||count>8192)throw std::runtime_error("Invalid engine certificate size.");
+ std::vector<uint8_t> der(count);Require(CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,der.data(),&count,nullptr,nullptr)!=FALSE,"Decode engine certificate");auto cert=CertCreateCertificateContext(X509_ASN_ENCODING,der.data(),count);Require(cert!=nullptr,"Validate engine certificate");
+ struct Free{PCCERT_CONTEXT value;~Free(){CertFreeCertificateContext(value);}} free{cert};if(CertVerifyTimeValidity(nullptr,cert->pCertInfo)!=0)throw std::runtime_error("The direct host certificate is expired or not yet valid.");
+ BYTE digest[32]{};count=32;Require(CryptHashCertificate2(BCRYPT_SHA256_ALGORITHM,0,nullptr,der.data(),static_cast<DWORD>(der.size()),digest,&count)!=FALSE&&count==32,"Fingerprint engine certificate");constexpr char hex[]="0123456789abcdef";std::string result;for(auto b:digest){result+=hex[b>>4];result+=hex[b&15];}return result;
+}
+std::wstring PairingCode(const Config& c,const std::string& fingerprint){if(!TitanTransport::IsFingerprint(fingerprint))throw std::invalid_argument("The direct host certificate is not ready.");return L"RDC3;"+c.host+L";"+std::to_wstring(c.port)+L";"+Wide(fingerprint)+L";"+Wide(c.secret)+L";"+Wide(c.room);}
 Pairing ParsePairing(const std::wstring& value){
  if(value.size()>2048)throw std::runtime_error("Connection code is too long.");std::vector<std::wstring> fields;size_t start=0;for(size_t i=0;i<=value.size();++i)if(i==value.size()||value[i]==L';'){fields.push_back(value.substr(start,i-start));start=i+1;}
- if(fields.size()!=8||fields[0]!=L"RDC1")throw std::runtime_error("Paste the complete RDC1 connection code from the host installer.");
- Pairing p;p.host=Utf8(fields[1]);if(p.host.empty()||p.host.size()>255||p.host.find_first_of("/\\ \r\n\t\0",0,8)!=p.host.npos)throw std::runtime_error("Invalid host address.");p.port=Port(Utf8(fields[2]));p.pin=Utf8(fields[3]);p.secret=Utf8(fields[4]);p.room=Utf8(fields[5]);p.relayToken=Utf8(fields[6]);p.relay=fields[7];p.noCode=p.secret==OpenAccessSecret;if(!TitanTransport::IsFingerprint(p.pin)||!TitanTransport::IsSecret(p.secret)||!TitanTransport::IsSecret(p.room)||!TitanTransport::IsFingerprint(p.relayToken))throw std::runtime_error("Invalid connection credentials.");return p;
+ if(fields.size()!=6||fields[0]!=L"RDC3")throw std::runtime_error("Install the updated direct host and copy its RDC3 connection code, or enter an IP address/DNS name for code-free access.");
+ Pairing p;p.host=Utf8(fields[1]);if(p.host.empty()||p.host.size()>255||p.host.find_first_of("/\\ \r\n\t\0",0,8)!=p.host.npos)throw std::runtime_error("Invalid host address.");p.port=Port(Utf8(fields[2]));if(p.port<1024||p.port>65514)throw std::runtime_error("Invalid GameStream base port.");p.pin=Utf8(fields[3]);p.secret=Utf8(fields[4]);p.room=Utf8(fields[5]);p.noCode=p.secret==OpenAccessSecret;if(!TitanTransport::IsFingerprint(p.pin)||!TitanTransport::IsSecret(p.secret)||!TitanTransport::IsSecret(p.room))throw std::runtime_error("Invalid connection credentials.");return p;
+}
+Pairing ParseDirectAddress(const std::wstring& text){
+ if(text.empty()||text.size()>300)throw std::invalid_argument("Enter an IP address or DNS name, optionally followed by :port.");Pairing p;p.noCode=true;p.secret=OpenAccessSecret;std::wstring host=text;
+ if(text.front()==L'['){const auto close=text.find(L']');if(close==text.npos)throw std::invalid_argument("Use [IPv6-address]:port for a custom IPv6 port.");host=text.substr(1,close-1);if(close+1<text.size()){if(text[close+1]!=L':')throw std::invalid_argument("Invalid IPv6 host address.");p.port=Port(Utf8(text.substr(close+2)));}}
+ else{const auto colon=text.rfind(L':');if(colon!=text.npos&&text.find(L':')==colon){host=text.substr(0,colon);p.port=Port(Utf8(text.substr(colon+1)));}}
+ p.host=Utf8(host);if(p.host.empty()||p.host.size()>255||p.host.find_first_of("/\\ ;\r\n\t\0",0,9)!=p.host.npos||p.port<1024||p.port>65514)throw std::invalid_argument("Invalid direct host address or GameStream port.");return p;
 }
 }

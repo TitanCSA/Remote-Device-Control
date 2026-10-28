@@ -1,7 +1,6 @@
 #include "Client.h"
 #include "VirtualInput.h"
 #include "Discovery.h"
-#include "Directory.h"
 #include "Transport.h"
 #include <windowsx.h>
 #include <d2d1.h>
@@ -13,20 +12,25 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <map>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 using namespace RemoteControl;
 namespace {
-constexpr UINT Changed=WM_APP+1,Stopped=WM_APP+2,ToggleFullscreen=WM_APP+3,InputFailed=WM_APP+4,HostsChanged=WM_APP+5;
+constexpr UINT Changed=WM_APP+1,Stopped=WM_APP+2,ToggleFullscreen=WM_APP+3,InputFailed=WM_APP+4,HostsChanged=WM_APP+5,ProbeFinished=WM_APP+6;
 constexpr wchar_t WindowClass[]=L"RemoteDeviceControlViewer",ViewClass[]=L"RemoteDeviceControlDesktopView";
 HWND window=nullptr,viewWindow=nullptr,codeEdit=nullptr,connectButton=nullptr,modeCombo=nullptr,hostList=nullptr,hostConnect=nullptr;
 std::atomic<HWND> notifyWindow{nullptr};std::atomic<bool> posted{false},hostsPosted{false};
 HFONT font=nullptr;UINT dpi=96;std::unique_ptr<Client> client;std::thread stopper;
-std::unique_ptr<DiscoveryBrowser> discovery;std::unique_ptr<DirectoryBrowser> directory;
+std::unique_ptr<DiscoveryBrowser> discovery;
 struct ListedHost {Pairing pairing;std::string name,address;bool local=false,busy=false,available=false,approval=true;};
 std::vector<ListedHost> hosts;std::string hostsSignature,ownRoom;int sideWidth=270;
-bool focused=false,closing=false,stopping=false,preview=false,sessionStarted=false,connecting=false,buttonHover=false;
-bool fullScreen=false,fullscreenHeld=false;uint8_t mouseButtons=0;int wheelX=0,wheelY=0,viewTop=154;
+bool focused=false,closing=false,stopping=false,preview=false,sessionStarted=false,connecting=false,probing=false,buttonHover=false;
+std::thread prober;std::atomic<bool> probeCancelled{true};std::mutex probeMutex;
+struct ProbeOutcome {Pairing pairing;GameStreamHostProbe identity;std::string error;unsigned fps=60;};
+std::unique_ptr<ProbeOutcome> probeOutcome;std::map<std::string,std::string> trustedEndpoints;
+bool fullScreen=false,fullscreenHeld=false;uint8_t mouseButtons=0;int wheelX=0,wheelY=0,viewTop=176;
 RECT imageRect{};std::array<bool,256> heldKeys{};HHOOK keyboardHook=nullptr;
 WINDOWPLACEMENT placement{sizeof(placement)};ULONGLONG statusPainted=0;std::string lastStatus;bool lastConnected=false;
 std::wstring uiError;ComPtr<ID2D1Factory> factory;ComPtr<ID2D1HwndRenderTarget> target;ComPtr<ID2D1Bitmap> bitmap;
@@ -38,29 +42,46 @@ void Fill(HDC dc,RECT rect,COLORREF color){HBRUSH brush=CreateSolidBrush(color);
 void Label(HDC dc,int x,int y,const std::wstring& text,COLORREF color=RGB(30,44,65)){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,color);TextOutW(dc,x,y,text.data(),static_cast<int>(text.size()));}
 void ChangedCallback(){const HWND destination=notifyWindow.load();if(destination&&!posted.exchange(true)&&!PostMessageW(destination,Changed,0,0))posted=false;}
 void HostsCallback(){const HWND destination=notifyWindow.load();if(destination&&!hostsPosted.exchange(true)&&!PostMessageW(destination,HostsChanged,0,0))hostsPosted=false;}
-ClientInfo Info(){ClientInfo result;if(client)result=client->Info();if(preview)result.status="Preview only. No connection, capture or input is active.";return result;}
+ClientInfo Info(){ClientInfo result;if(client)result=client->Info();if(probing){result.status="Checking the host certificate. No access code or input has been sent...";result.connecting=true;}if(preview)result.status="Preview only. No connection, capture or input is active.";return result;}
 void ResetTarget(){bitmap.Reset();target.Reset();bitmapWidth=bitmapHeight=0;uploadedSequence=~uint64_t(0);uploadedQpc=0;}
 void UpdateControls(){
- const auto info=Info();const std::wstring label=stopping?L"Disconnecting…":sessionStarted||info.connected?L"Disconnect":L"Connect";
+ const auto info=Info();const std::wstring label=stopping?L"Disconnecting...":probing||connecting?L"Cancel connection":sessionStarted||info.connected?L"Disconnect":L"Connect";
  if(Text(connectButton)!=label)SetWindowTextW(connectButton,label.c_str());
- EnableWindow(connectButton,!preview&&!stopping);EnableWindow(codeEdit,!sessionStarted&&!stopping);EnableWindow(modeCombo,!sessionStarted&&!stopping);
+ EnableWindow(connectButton,!preview&&!stopping);EnableWindow(codeEdit,!sessionStarted&&!stopping&&!probing);EnableWindow(modeCombo,!sessionStarted&&!stopping&&!probing);
  const auto selected=static_cast<int>(SendMessageW(hostList,LB_GETCURSEL,0,0));const bool available=selected>=0&&static_cast<size_t>(selected)<hosts.size()&&hosts[static_cast<size_t>(selected)].available&&!hosts[static_cast<size_t>(selected)].busy;
- EnableWindow(hostConnect,!preview&&!stopping&&!sessionStarted&&available);
+ EnableWindow(hostConnect,!preview&&!stopping&&!sessionStarted&&!probing&&available);
 }
 void RefreshHosts(){
  std::string selected;const auto old=static_cast<int>(SendMessageW(hostList,LB_GETCURSEL,0,0));if(old>=0&&static_cast<size_t>(old)<hosts.size())selected=hosts[static_cast<size_t>(old)].pairing.room;
  std::vector<ListedHost> next;
- if(directory)for(const auto& h:directory->Hosts()){if(h.room==ownRoom||next.size()==64)continue;ListedHost item;item.name=h.name;item.address="Internet relay";item.busy=h.busy;item.available=h.available;item.approval=h.requireApproval;item.pairing.pin=h.pin;item.pairing.room=h.room;item.pairing.secret=OpenAccessSecret;item.pairing.relayToken=h.relayToken;item.pairing.relay=h.relay;item.pairing.noCode=true;next.push_back(std::move(item));}
  if(discovery)for(const auto& h:discovery->Hosts()){if(h.room==ownRoom)continue;ListedHost item;item.name=h.name;item.address=h.address;item.local=true;item.busy=h.busy;item.available=h.available;item.approval=h.requireApproval;item.pairing.host=h.address;item.pairing.port=h.port;item.pairing.pin=h.pin;item.pairing.room=h.room;item.pairing.secret=OpenAccessSecret;item.pairing.noCode=true;
   auto existing=std::find_if(next.begin(),next.end(),[&](const ListedHost& row){return row.pairing.room==h.room;});if(existing!=next.end()){if(TitanTransport::ConstantTimeEqual(existing->pairing.pin,h.pin))*existing=std::move(item);}else if(next.size()<64)next.push_back(std::move(item));
  }
  std::stable_sort(next.begin(),next.end(),[](const ListedHost& a,const ListedHost& b){if(a.local!=b.local)return a.local;return a.name<b.name;});std::string signature;
- for(const auto& h:next)signature+=h.pairing.room+'|'+h.name+'|'+h.address+'|'+(h.local?'1':'0')+(h.busy?'1':'0')+(h.available?'1':'0')+(h.approval?'1':'0')+'|'+h.pairing.pin+'|'+h.pairing.relayToken+'\n';
+ for(const auto& h:next)signature+=h.pairing.room+'|'+h.name+'|'+h.address+'|'+(h.local?'1':'0')+(h.busy?'1':'0')+(h.available?'1':'0')+(h.approval?'1':'0')+'|'+h.pairing.pin+'\n';
  if(signature==hostsSignature){if(hosts.empty())InvalidateRect(hostList,nullptr,FALSE);return;}hostsSignature=std::move(signature);hosts=std::move(next);SendMessageW(hostList,WM_SETREDRAW,FALSE,0);SendMessageW(hostList,LB_RESETCONTENT,0,0);int selection=-1;
  for(size_t i=0;i<hosts.size();++i){SendMessageW(hostList,LB_ADDSTRING,0,0);if(hosts[i].pairing.room==selected)selection=static_cast<int>(i);}if(selection<0&&!hosts.empty())selection=0;SendMessageW(hostList,LB_SETCURSEL,static_cast<WPARAM>(selection),0);SendMessageW(hostList,WM_SETREDRAW,TRUE,0);InvalidateRect(hostList,nullptr,FALSE);UpdateControls();
 }
-void Connect(Pairing pairing,unsigned mode){uiError.clear();sessionStarted=connecting=true;UpdateControls();try{client->Start(std::move(pairing),mode);}catch(...){sessionStarted=connecting=false;UpdateControls();throw;}}
-void ConnectSelected(){if(preview||stopping||sessionStarted||!client)return;const auto selected=static_cast<int>(SendMessageW(hostList,LB_GETCURSEL,0,0));if(selected<0||static_cast<size_t>(selected)>=hosts.size())return;const auto row=hosts[static_cast<size_t>(selected)];if(row.busy||!row.available)throw std::runtime_error(row.busy?"This PC already has a controller. Wait until its current session ends.":"Unlock and sign in to the target PC before connecting.");Connect(row.pairing,row.local?1u:2u);}
+unsigned SelectedFps(){const auto selection=SendMessageW(modeCombo,CB_GETCURSEL,0,0);static constexpr unsigned rates[]{60,90,120,240};if(selection<0||selection>3)throw std::runtime_error("Choose a video frame-rate target.");return rates[selection];}
+void Connect(Pairing pairing,unsigned fps){uiError.clear();sessionStarted=connecting=true;UpdateControls();try{client->Start(std::move(pairing),0,fps);}catch(...){sessionStarted=connecting=false;UpdateControls();throw;}}
+void Probe(Pairing pairing,unsigned fps){
+ if(prober.joinable())prober.join();auto pending=std::make_unique<ProbeOutcome>();pending->pairing=std::move(pairing);pending->fps=fps;uiError.clear();probing=true;probeCancelled=false;UpdateControls();InvalidateRect(window,nullptr,FALSE);
+ try{prober=std::thread([result=std::move(pending)]()mutable noexcept {try{result->identity=ProbePublicHost(result->pairing.host,result->pairing.port,[]{return probeCancelled.load();});if(!result->pairing.pin.empty()&&!TitanTransport::ConstantTimeEqual(result->pairing.pin,result->identity.pin))throw std::runtime_error("The host certificate changed since discovery. Refresh the list and verify its fingerprint in the host setup.");}catch(const std::exception& error){try{result->error=error.what();}catch(...){result.reset();}}catch(...){result.reset();}try{std::lock_guard<std::mutex> guard(probeMutex);probeOutcome=std::move(result);}catch(...){}const auto destination=notifyWindow.load();if(destination)PostMessageW(destination,ProbeFinished,0,0);});}
+ catch(...){probing=false;probeCancelled=true;UpdateControls();throw;}
+}
+void FinishProbe(){
+ if(stopping)return;if(prober.joinable())prober.join();probing=false;std::unique_ptr<ProbeOutcome> result;{std::lock_guard<std::mutex> guard(probeMutex);result=std::move(probeOutcome);}UpdateControls();
+ if(probeCancelled)return;if(!result){uiError=L"The certificate check could not complete. No access code was sent.";InvalidateRect(window,nullptr,FALSE);return;}if(!result->error.empty()){uiError=Wide(result->error);InvalidateRect(window,nullptr,FALSE);return;}
+ auto& pairing=result->pairing;const auto endpoint=pairing.host+":"+std::to_string(pairing.port);const auto trusted=trustedEndpoints.find(endpoint);
+ if(trusted==trustedEndpoints.end()||trusted->second!=result->identity.pin){
+  std::wstring fingerprint;for(size_t i=0;i<result->identity.pin.size();i+=16){if(i)fingerprint+=L"\r\n";fingerprint+=Wide(result->identity.pin.substr(i,16));}
+  const auto message=L"Connect directly to "+Wide(endpoint)+L"?\r\n\r\nServer certificate SHA-256:\r\n"+fingerprint+L"\r\n\r\nCompare this fingerprint with the target PC's setup or another trusted source before continuing. No access code has been sent. The target may request permission.\r\n\r\nTrust this certificate for this viewer session?";
+  if(MessageBoxW(window,message.c_str(),L"Verify the target PC",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES){uiError=L"Connection cancelled before authentication.";InvalidateRect(window,nullptr,FALSE);return;}
+  trustedEndpoints[endpoint]=result->identity.pin;
+ }
+ pairing.pin=result->identity.pin;Connect(std::move(pairing),result->fps);
+}
+void ConnectSelected(){if(preview||stopping||sessionStarted||probing||!client)return;const auto selected=static_cast<int>(SendMessageW(hostList,LB_GETCURSEL,0,0));if(selected<0||static_cast<size_t>(selected)>=hosts.size())return;const auto row=hosts[static_cast<size_t>(selected)];if(row.busy||!row.available)throw std::runtime_error(row.busy?"This PC already has a controller. Wait until its current session ends.":"Unlock and sign in to the target PC before connecting.");Probe(row.pairing,SelectedFps());}
 void ReleaseInput() noexcept {
  if(focused&&client)try{client->Push(Input{InputKind::ReleaseAll});}catch(...){}
  focused=false;mouseButtons=0;wheelX=wheelY=0;heldKeys.fill(false);fullscreenHeld=false;
@@ -69,9 +90,10 @@ void ReleaseInput() noexcept {
  if(window){RECT rect{};GetClientRect(window,&rect);rect.top=(std::max<LONG>)(0,rect.bottom-Scale(34));InvalidateRect(window,&rect,FALSE);}
 }
 void Stop(bool close){
- ReleaseInput();closing=closing||close;if(stopping)return;stopping=true;UpdateControls();
+ ReleaseInput();closing=closing||close;if(stopping)return;stopping=true;probeCancelled=true;UpdateControls();
  if(stopper.joinable())stopper.join();
- stopper=std::thread([]{if(client)client->Stop();const HWND destination=notifyWindow.load();if(destination)PostMessageW(destination,Stopped,0,0);});
+ try{stopper=std::thread([]{if(prober.joinable())prober.join();if(client)client->Stop();const HWND destination=notifyWindow.load();if(destination)PostMessageW(destination,Stopped,0,0);});}
+ catch(...){if(prober.joinable())prober.join();if(client)client->Stop();PostMessageW(window,Stopped,0,0);}
 }
 void SetFonts(){
  const HFONT old=font;font=CreateFontW(-Scale(16),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
@@ -83,8 +105,8 @@ void SetFonts(){
 void Layout(){
  if(!window)return;RECT rect{};GetClientRect(window,&rect);const int width=static_cast<int>(rect.right),heightPixels=static_cast<int>(rect.bottom);const int margin=Scale(24),gap=Scale(12),height=Scale(34);
  const bool stacked=width<Scale(850);const int modeWidth=Scale(180),buttonWidth=Scale(170);
- if(stacked){MoveWindow(codeEdit,margin,Scale(62),(std::max)(1,width-margin*2),height,TRUE);MoveWindow(modeCombo,margin,Scale(108),modeWidth,Scale(220),TRUE);MoveWindow(connectButton,(std::max)(margin,width-margin-buttonWidth),Scale(108),buttonWidth,height,TRUE);viewTop=Scale(198);}
- else{const int codeWidth=(std::max)(1,width-margin*2-modeWidth-buttonWidth-gap*2);MoveWindow(codeEdit,margin,Scale(62),codeWidth,height,TRUE);MoveWindow(modeCombo,margin+codeWidth+gap,Scale(62),modeWidth,Scale(220),TRUE);MoveWindow(connectButton,width-margin-buttonWidth,Scale(62),buttonWidth,height,TRUE);viewTop=Scale(154);}
+ if(stacked){MoveWindow(codeEdit,margin,Scale(62),(std::max)(1,width-margin*2),height,TRUE);MoveWindow(modeCombo,margin,Scale(108),modeWidth,Scale(220),TRUE);MoveWindow(connectButton,(std::max)(margin,width-margin-buttonWidth),Scale(108),buttonWidth,height,TRUE);viewTop=Scale(220);}
+ else{const int codeWidth=(std::max)(1,width-margin*2-modeWidth-buttonWidth-gap*2);MoveWindow(codeEdit,margin,Scale(62),codeWidth,height,TRUE);MoveWindow(modeCombo,margin+codeWidth+gap,Scale(62),modeWidth,Scale(220),TRUE);MoveWindow(connectButton,width-margin-buttonWidth,Scale(62),buttonWidth,height,TRUE);viewTop=Scale(176);}
  const int side=Scale(sideWidth);MoveWindow(hostList,Scale(16),viewTop+Scale(48),side-Scale(28),(std::max)(1,heightPixels-viewTop-Scale(138)),TRUE);MoveWindow(hostConnect,Scale(16),heightPixels-Scale(80),side-Scale(28),Scale(34),TRUE);
  MoveWindow(viewWindow,side,viewTop,(std::max)(1,width-side-Scale(12)),(std::max)(1,heightPixels-viewTop-Scale(36)),TRUE);
  InvalidateRect(window,nullptr,FALSE);
@@ -133,7 +155,7 @@ void RenderView(HWND hwnd,HDC dc,bool direct){
  RECT rect{};GetClientRect(hwnd,&rect);imageRect={};
  const auto frame=client?client->Latest():nullptr;
  if(!Info().connected||!ValidImage(frame)){
-  Fill(dc,rect,RGB(15,20,30));SelectObject(dc,font);Label(dc,Scale(26),Scale(28),preview?L"Preview · no connection, capture or input is active.":L"The authenticated remote desktop will appear here.",RGB(218,227,244));return;
+  Fill(dc,rect,RGB(15,20,30));SelectObject(dc,font);Label(dc,Scale(26),Scale(28),preview?L"Preview | no connection, capture or input is active.":L"The authenticated remote desktop will appear here.",RGB(218,227,244));return;
  }
  const float scale=(std::min)(float(rect.right)/float(frame->width),float(rect.bottom)/float(frame->height));const float width=float(frame->width)*scale,height=float(frame->height)*scale;
  const float x=(float(rect.right)-width)/2,y=(float(rect.bottom)-height)/2;imageRect={static_cast<LONG>(x),static_cast<LONG>(y),static_cast<LONG>(x+width),static_cast<LONG>(y+height)};
@@ -151,22 +173,23 @@ void RenderView(HWND hwnd,HDC dc,bool direct){
 }
 void RenderWindow(HDC dc){
  RECT rect{};GetClientRect(window,&rect);SelectObject(dc,font);Fill(dc,rect,RGB(246,248,252));
- Label(dc,Scale(24),Scale(20),L"Remote Device Control",RGB(20,83,204));if(rect.right>=Scale(1050))Label(dc,rect.right-Scale(355),Scale(22),L"Portable viewer · Vdevice-powered host",RGB(98,111,132));
- const auto info=Info();std::wostringstream status;status<<Wide(info.status);if(info.connected){status<<L"  |  "<<Wide(info.route)<<L"  |  "<<std::fixed<<std::setprecision(0)<<info.framesPerSecond<<L" FPS  |  input ACK "<<std::setprecision(1)<<info.inputRttMs<<L" ms";if(info.remaining100ns){auto seconds=info.remaining100ns/10000000;status<<L"  |  demo "<<seconds/60<<L":"<<std::setfill(L'0')<<std::setw(2)<<seconds%60;}}if(!uiError.empty())status<<L"  |  "<<uiError;
+ Label(dc,Scale(24),Scale(20),L"Remote Device Control",RGB(20,83,204));if(rect.right>=Scale(1050))Label(dc,rect.right-Scale(355),Scale(22),L"Portable viewer | Vdevice-powered host",RGB(98,111,132));
+ const auto info=Info();std::wostringstream status;status<<Wide(info.status);if(info.connected){status<<L"  |  "<<Wide(info.route)<<L"  |  "<<std::fixed<<std::setprecision(0)<<info.framesPerSecond<<L" decoded FPS  |  network RTT "<<std::setprecision(1)<<info.inputRttMs<<L" ms";if(info.remaining100ns){auto seconds=info.remaining100ns/10000000;status<<L"  |  demo "<<seconds/60<<L":"<<std::setfill(L'0')<<std::setw(2)<<seconds%60;}}if(!uiError.empty())status<<L"  |  "<<uiError;
+ RECT addressHint{Scale(24),viewTop-Scale(75),rect.right-Scale(24),viewTop-Scale(53)};SetTextColor(dc,RGB(98,111,132));SetBkMode(dc,TRANSPARENT);DrawTextW(dc,L"Internet: in RDC3;HOST;... replace HOST with the reachable public IP/DNS; keep the other fields.",-1,&addressHint,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
  RECT statusRect{Scale(24),viewTop-Scale(46),rect.right-Scale(24),viewTop-Scale(8)};SetTextColor(dc,RGB(65,83,111));SetBkMode(dc,TRANSPARENT);DrawTextW(dc,status.str().c_str(),-1,&statusRect,DT_LEFT|DT_WORDBREAK|DT_END_ELLIPSIS);
  Label(dc,Scale(20),viewTop+Scale(4),L"Available PCs",RGB(30,44,65));
- Label(dc,Scale(20),viewTop+Scale(23),preview?L"Discovery off in preview":L"LAN + Internet · auto refresh",RGB(98,111,132));
- Label(dc,Scale(24),rect.bottom-Scale(26),focused?L"Keyboard captured · Ctrl+Alt+F12 releases it · F11 full screen":L"Click the remote desktop to control it · Ctrl+Alt+F12 releases keyboard/mouse",RGB(96,112,136));
+ Label(dc,Scale(20),viewTop+Scale(23),preview?L"Discovery off in preview":L"Nearby LAN - auto refresh",RGB(98,111,132));
+ Label(dc,Scale(24),rect.bottom-Scale(26),focused?L"Keyboard captured | Ctrl+Alt+F12 releases it | F11 full screen":L"Click the remote desktop to control it | Ctrl+Alt+F12 releases keyboard/mouse",RGB(96,112,136));
 }
 void DrawHost(const DRAWITEMSTRUCT& item){
  Fill(item.hDC,item.rcItem,(item.itemState&ODS_SELECTED)?RGB(228,238,255):RGB(255,255,255));if(item.itemID>=hosts.size())return;const auto& row=hosts[item.itemID];SelectObject(item.hDC,font);SetBkMode(item.hDC,TRANSPARENT);
  RECT text=item.rcItem;text.left+=Scale(12);text.right-=Scale(10);text.top+=Scale(9);text.bottom=text.top+Scale(23);SetTextColor(item.hDC,RGB(28,43,65));auto name=Wide(row.name);DrawTextW(item.hDC,name.c_str(),-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
- text.top+=Scale(24);text.bottom=text.top+Scale(20);SetTextColor(item.hDC,RGB(97,113,136));auto address=Wide(row.address)+(row.local?L" · LAN":L"");DrawTextW(item.hDC,address.c_str(),-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
- text.top+=Scale(23);text.bottom=text.top+Scale(19);const auto state=row.busy?L"Busy · one controller connected":!row.available?L"Locked · sign in on target":row.approval?L"Available · approval requested":L"Available · automatic access";SetTextColor(item.hDC,row.available&&!row.busy?RGB(25,87,211):RGB(97,113,136));DrawTextW(item.hDC,state,-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+ text.top+=Scale(24);text.bottom=text.top+Scale(20);SetTextColor(item.hDC,RGB(97,113,136));auto address=Wide(row.address)+(row.local?L" | LAN":L"");DrawTextW(item.hDC,address.c_str(),-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+ text.top+=Scale(23);text.bottom=text.top+Scale(19);const auto state=row.busy?L"Busy | one controller connected":!row.available?L"Locked | sign in on target":row.approval?L"Available | approval requested":L"Available | automatic access";SetTextColor(item.hDC,row.available&&!row.busy?RGB(25,87,211):RGB(97,113,136));DrawTextW(item.hDC,state,-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
  RECT line=item.rcItem;line.top=line.bottom-1;Fill(item.hDC,line,RGB(233,238,246));if(item.itemState&ODS_FOCUS){RECT focus=item.rcItem;InflateRect(&focus,-2,-2);DrawFocusRect(item.hDC,&focus);}
 }
 LRESULT CALLBACK Widget(HWND hwnd,UINT message,WPARAM w,LPARAM l,UINT_PTR id,DWORD_PTR){
- if(hwnd==hostList&&message==WM_PAINT&&hosts.empty()){PaintScope paint(hwnd);RECT rect{};GetClientRect(hwnd,&rect);Fill(paint.dc,rect,RGB(255,255,255));SelectObject(paint.dc,font);InflateRect(&rect,-Scale(12),-Scale(16));SetTextColor(paint.dc,RGB(98,111,132));SetBkMode(paint.dc,TRANSPARENT);std::wstring text=preview?L"No network discovery runs in preview mode.":L"Looking for PCs…\n\nEnable public discovery in the target PC's setup. Private PCs still connect using their code above.";if(directory&&!directory->Error().empty())text+=L"\n\nInternet directory unavailable. LAN discovery continues.";DrawTextW(paint.dc,text.c_str(),-1,&rect,DT_WORDBREAK|DT_NOPREFIX);return 0;}
+ if(hwnd==hostList&&message==WM_PAINT&&hosts.empty()){PaintScope paint(hwnd);RECT rect{};GetClientRect(hwnd,&rect);Fill(paint.dc,rect,RGB(255,255,255));SelectObject(paint.dc,font);InflateRect(&rect,-Scale(12),-Scale(16));SetTextColor(paint.dc,RGB(98,111,132));SetBkMode(paint.dc,TRANSPARENT);const std::wstring text=preview?L"No network discovery runs in preview mode.":L"Looking for nearby PCs...\n\nEnable code-free discovery in the target PC's setup, or enter its IP address / DNS name above.\n\nFor private access, paste its RDC3 connection code. Internet access requires a reachable address and the host's ports; no central relay is used.";DrawTextW(paint.dc,text.c_str(),-1,&rect,DT_WORDBREAK|DT_NOPREFIX);return 0;}
  if(message==WM_SETCURSOR&&IsWindowEnabled(hwnd)){SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;}
  if(hwnd==connectButton&&message==WM_MOUSEMOVE&&!buttonHover){buttonHover=true;TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};TrackMouseEvent(&track);InvalidateRect(hwnd,nullptr,FALSE);}
  if(hwnd==connectButton&&message==WM_MOUSELEAVE){buttonHover=false;InvalidateRect(hwnd,nullptr,FALSE);}
@@ -202,21 +225,22 @@ LRESULT WindowMessage(HWND hwnd,UINT message,WPARAM w,LPARAM l){
   hostList=CreateWindowExW(WS_EX_CLIENTEDGE,WC_LISTBOXW,L"Available PCs",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_TABSTOP|LBS_OWNERDRAWFIXED|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,0,0,1,1,hwnd,reinterpret_cast<HMENU>(5),nullptr,nullptr);
   hostConnect=CreateWindowW(WC_BUTTONW,L"Connect selected PC",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,1,1,hwnd,reinterpret_cast<HMENU>(6),nullptr,nullptr);
   if(!codeEdit||!modeCombo||!connectButton||!viewWindow||!hostList||!hostConnect)throw std::runtime_error(WindowsError("Viewer controls",GetLastError()));
-  SendMessageW(codeEdit,EM_SETCUEBANNER,FALSE,reinterpret_cast<LPARAM>(L"Paste the private connection code from the target PC"));SendMessageW(codeEdit,EM_SETLIMITTEXT,2048,0);
-  for(const auto* text:{L"Automatic",L"LAN direct",L"Internet relay"})SendMessageW(modeCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));SendMessageW(modeCombo,CB_SETCURSEL,0,0);
+  SendMessageW(codeEdit,EM_SETCUEBANNER,FALSE,reinterpret_cast<LPARAM>(L"IP address / DNS name[:port], or private RDC3 connection code"));SendMessageW(codeEdit,EM_SETLIMITTEXT,2048,0);
+  for(const auto* text:{L"Video target: 60 FPS",L"Video target: 90 FPS",L"Video target: 120 FPS",L"Video target: 240 FPS"})SendMessageW(modeCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));SendMessageW(modeCombo,CB_SETCURSEL,0,0);
   SetWindowSubclass(connectButton,Widget,1,0);SetWindowSubclass(modeCombo,Widget,2,0);SetWindowSubclass(hostConnect,Widget,3,0);SetWindowSubclass(hostList,Widget,4,0);SetFonts();
-  if(!preview){client=std::make_unique<Client>(ChangedCallback);wchar_t room[64]{};DWORD size=sizeof(room);if(RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\TitanCSA\\RemoteDeviceControl",L"HostRoom",RRF_RT_REG_SZ|RRF_SUBKEY_WOW6464KEY,nullptr,room,&size)==ERROR_SUCCESS)ownRoom=Utf8(room);discovery=std::make_unique<DiscoveryBrowser>();directory=std::make_unique<DirectoryBrowser>();discovery->Start(HostsCallback);directory->Start(HostsCallback);}UpdateControls();Layout();return 0;
+  if(!preview){client=std::make_unique<Client>(ChangedCallback);wchar_t room[64]{};DWORD size=sizeof(room);if(RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\TitanCSA\\RemoteDeviceControl",L"HostRoom",RRF_RT_REG_SZ|RRF_SUBKEY_WOW6464KEY,nullptr,room,&size)==ERROR_SUCCESS)ownRoom=Utf8(room);discovery=std::make_unique<DiscoveryBrowser>();discovery->Start(HostsCallback);}UpdateControls();Layout();return 0;
  }
  case WM_SIZE:Layout();return 0;
  case WM_DPICHANGED:{dpi=HIWORD(w);SetFonts();const RECT* suggested=reinterpret_cast<const RECT*>(l);SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);Layout();return 0;}
  case WM_GETMINMAXINFO:{auto* info=reinterpret_cast<MINMAXINFO*>(l);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);info->ptMinTrackSize.x=(std::min<LONG>)(Scale(840),monitor.rcWork.right-monitor.rcWork.left);info->ptMinTrackSize.y=(std::min<LONG>)(Scale(520),monitor.rcWork.bottom-monitor.rcWork.top);return 0;}
- case Changed:{posted=false;const auto info=Info();if(info.connected){connecting=false;sessionStarted=true;}else if(sessionStarted&&(!connecting||info.status.rfind("Connecting",0)!=0)){sessionStarted=connecting=false;ReleaseInput();}UpdateControls();InvalidateRect(viewWindow,nullptr,FALSE);const auto now=GetTickCount64();if(now-statusPainted>=250||info.status!=lastStatus||info.connected!=lastConnected){RECT rect{};GetClientRect(hwnd,&rect);rect.top=viewTop-Scale(48);rect.bottom=viewTop;InvalidateRect(hwnd,&rect,FALSE);statusPainted=now;lastStatus=info.status;lastConnected=info.connected;}return 0;}
+ case Changed:{posted=false;const auto info=Info();if(!probing){const bool wasActive=sessionStarted;connecting=info.connecting;sessionStarted=info.connected||info.connecting;if(wasActive&&!sessionStarted)ReleaseInput();}UpdateControls();InvalidateRect(viewWindow,nullptr,FALSE);const auto now=GetTickCount64();if(now-statusPainted>=250||info.status!=lastStatus||info.connected!=lastConnected){RECT rect{};GetClientRect(hwnd,&rect);rect.top=viewTop-Scale(48);rect.bottom=viewTop;InvalidateRect(hwnd,&rect,FALSE);statusPainted=now;lastStatus=info.status;lastConnected=info.connected;}return 0;}
  case HostsChanged:hostsPosted=false;RefreshHosts();return 0;
+ case ProbeFinished:FinishProbe();return 0;
  case WM_COMMAND:
   if(LOWORD(w)==5){if(HIWORD(w)==LBN_SELCHANGE)UpdateControls();else if(HIWORD(w)==LBN_DBLCLK)ConnectSelected();return 0;}
   if(LOWORD(w)==6){ConnectSelected();return 0;}
-  if(LOWORD(w)==3&&!stopping&&!preview&&client){if(sessionStarted||Info().connected)Stop(false);else{auto pairing=ParsePairing(Text(codeEdit));const auto mode=SendMessageW(modeCombo,CB_GETCURSEL,0,0);if(mode<0||mode>2)throw std::runtime_error("Choose a connection mode.");Connect(std::move(pairing),static_cast<unsigned>(mode));}}return 0;
- case Stopped:if(stopper.joinable())stopper.join();stopping=false;sessionStarted=connecting=false;UpdateControls();if(closing)DestroyWindow(hwnd);else InvalidateRect(hwnd,nullptr,FALSE);return 0;
+  if(LOWORD(w)==3&&!stopping&&!preview&&client){if(sessionStarted||probing||Info().connected)Stop(false);else{const auto address=Text(codeEdit);if(address.find(L';')!=address.npos)Connect(ParsePairing(address),SelectedFps());else Probe(ParseDirectAddress(address),SelectedFps());}}return 0;
+ case Stopped:if(stopper.joinable())stopper.join();stopping=false;probing=false;sessionStarted=connecting=false;{std::lock_guard<std::mutex> guard(probeMutex);probeOutcome.reset();}UpdateControls();if(closing)DestroyWindow(hwnd);else InvalidateRect(hwnd,nullptr,FALSE);return 0;
  case ToggleFullscreen:FullScreen();return 0;
  case InputFailed:if(uiError.empty())uiError=L"Input capture failed; the connection was stopped safely.";if(!stopping)Stop(false);return 0;
  case WM_ACTIVATE:if(LOWORD(w)==WA_INACTIVE)ReleaseInput();return 0;
@@ -246,8 +270,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int show){
  WNDCLASSEXW main{sizeof(main)};main.lpfnWndProc=Procedure;main.hInstance=instance;main.hCursor=LoadCursorW(nullptr,IDC_ARROW);main.hIcon=LoadIconW(nullptr,IDI_APPLICATION);main.lpszClassName=WindowClass;
  if(!RegisterClassExW(&view)||!RegisterClassExW(&main)){CoUninitialize();return 1;}
  RECT work{};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);const int width=(std::min<LONG>)(1280,(std::max<LONG>)(640,work.right-work.left-24)),height=(std::min<LONG>)(820,(std::max<LONG>)(480,work.bottom-work.top-24));
- HWND hwnd=CreateWindowExW(0,WindowClass,L"Remote Device Control · Viewer",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,width,height,nullptr,nullptr,instance,nullptr);
+ HWND hwnd=CreateWindowExW(0,WindowClass,L"Remote Device Control | Viewer",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,width,height,nullptr,nullptr,instance,nullptr);
  if(!hwnd){client.reset();CoUninitialize();return 1;}ShowWindow(hwnd,show);MSG message{};
  while(GetMessageW(&message,nullptr,0,0)>0){if(message.message==WM_KEYDOWN&&message.wParam==VK_F11&&!(message.lParam&(1ll<<30))){PostMessageW(hwnd,ToggleFullscreen,0,0);continue;}if(!IsDialogMessageW(hwnd,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
- if(stopper.joinable())stopper.join();if(client)client->Stop();client.reset();if(discovery)discovery->Stop();if(directory)directory->Stop();discovery.reset();directory.reset();CoUninitialize();return 0;
+ probeCancelled=true;if(stopper.joinable())stopper.join();if(prober.joinable())prober.join();if(client)client->Stop();client.reset();if(discovery)discovery->Stop();discovery.reset();CoUninitialize();return 0;
 }

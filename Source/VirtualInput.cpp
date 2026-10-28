@@ -13,6 +13,9 @@
 
 namespace RemoteControl {
 namespace {
+// DEVPKEY_Device_InstanceId from the Windows SDK, defined locally so the
+// native MSVC and MinGW builds require no external property-key object file.
+constexpr DEVPROPKEY InstanceIdProperty={{0x78c34fc8,0x104a,0x4aca,{0x9e,0xa4,0x52,0x4d,0x52,0x99,0x6e,0x57}},256};
 std::wstring SessionSerial(const wchar_t* prefix){
     GUID id{};const auto result=CoCreateGuid(&id);
     if(FAILED(result))throw std::runtime_error(WindowsError("Generate private virtual input instance",static_cast<uint32_t>(result)));
@@ -54,6 +57,32 @@ bool ClassReady(const std::wstring& serial,bool keyboard,std::string& reason){
     unsigned budget=32;reason=keyboard?"Windows has not created the owned keyboard class child.":"Windows has not created the owned mouse class child.";
     return ChildReady(parent,keyboard?L"{4D36E96B-E325-11CE-BFC1-08002BE10318}":L"{4D36E96F-E325-11CE-BFC1-08002BE10318}",0,budget,reason);
 }
+}
+bool RawInputDeviceReady(const std::wstring& ownedUsbInstance,bool keyboard,std::string& reason){
+    const auto separator=ownedUsbInstance.find(L'\\',4);
+    if(ownedUsbInstance.size()<5||ownedUsbInstance.size()>=MAX_DEVICE_ID_LEN||ownedUsbInstance.compare(0,4,L"USB\\")||separator==ownedUsbInstance.npos||separator+1==ownedUsbInstance.size()||ownedUsbInstance.find(L'\\',separator+1)!=ownedUsbInstance.npos||std::any_of(ownedUsbInstance.begin(),ownedUsbInstance.end(),[](wchar_t c){return c<32;})){
+        reason="An exact bounded owned USB instance is required for Windows input readiness.";return false;
+    }
+    auto owned=ownedUsbInstance;DEVINST owner=0;
+    if(CM_Locate_DevNodeW(&owner,owned.data(),CM_LOCATE_DEVNODE_NORMAL)!=CR_SUCCESS){reason="Windows has not enumerated the exact owned USB input device.";return false;}
+    unsigned budget=32;reason=keyboard?"Windows has not started the owned keyboard class child.":"Windows has not started the owned mouse class child.";
+    if(!ChildReady(owner,keyboard?L"{4D36E96B-E325-11CE-BFC1-08002BE10318}":L"{4D36E96F-E325-11CE-BFC1-08002BE10318}",0,budget,reason))return false;
+    reason=keyboard?"Windows has not registered the owned keyboard with its input manager.":"Windows has not registered the owned mouse with its input manager.";
+    UINT count=0;if(GetRawInputDeviceList(nullptr,&count,sizeof(RAWINPUTDEVICELIST))==UINT(-1)||!count||count>4096)return false;
+    std::vector<RAWINPUTDEVICELIST> devices(count);const auto returned=GetRawInputDeviceList(devices.data(),&count,sizeof(RAWINPUTDEVICELIST));if(returned==UINT(-1)||returned>devices.size())return false;
+    for(size_t at=0;at<returned;++at){
+        const auto& raw=devices[at];if(raw.dwType!=static_cast<DWORD>(keyboard?RIM_TYPEKEYBOARD:RIM_TYPEMOUSE))continue;
+        UINT characters=0;if(GetRawInputDeviceInfoW(raw.hDevice,RIDI_DEVICENAME,nullptr,&characters)==UINT(-1)||!characters||characters>32767)continue;
+        std::wstring name(static_cast<size_t>(characters)+1,L'\0');UINT capacity=static_cast<UINT>(name.size());const auto copied=GetRawInputDeviceInfoW(raw.hDevice,RIDI_DEVICENAME,name.data(),&capacity);if(copied==UINT(-1)||!copied||!name[0]||std::find(name.begin(),name.end(),L'\0')==name.end())continue;
+        // Normalize only the documented Win32/NT DOS-device namespace prefix;
+        // the interface itself stays opaque and is resolved through CfgMgr32.
+        if(name.compare(0,4,L"\\??\\")==0)name.replace(0,4,L"\\\\?\\");
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};DEVPROPTYPE type=0;ULONG bytes=sizeof(instance);
+        if(CM_Get_Device_Interface_PropertyW(name.c_str(),&InstanceIdProperty,&type,reinterpret_cast<PBYTE>(instance),&bytes,0)!=CR_SUCCESS||type!=DEVPROP_TYPE_STRING||bytes<sizeof(wchar_t)||bytes>sizeof(instance)||bytes%sizeof(wchar_t)||instance[bytes/sizeof(wchar_t)-1])continue;
+        DEVINST node=0;if(CM_Locate_DevNodeW(&node,instance,CM_LOCATE_DEVNODE_NORMAL)!=CR_SUCCESS)continue;
+        for(unsigned depth=0;depth<16;++depth){if(node==owner){reason.clear();return true;}DEVINST parent=0;if(CM_Get_Parent(&parent,node,0)!=CR_SUCCESS||parent==node)break;node=parent;}
+    }
+    return false;
 }
 uint32_t UsageFromScan(uint32_t scan,bool extended) noexcept {
     if(scan>255)return 0;
@@ -235,10 +264,23 @@ void VirtualInput::Start(){
         // USB configured/powered alone does not establish that kbdhid/mouhid
         // started. Inspect only these random per-capture instances, once at
         // startup; report broken third-party class drivers without altering them.
-        std::string reason;
+        std::string reason;bool primed=false;uint64_t neutralTarget=0;
+        const auto keyboardInstance=L"USB\\VID_FFFF&PID_0021\\"+keyboardSerial,mouseInstance=L"USB\\VID_FFFF&PID_0022\\"+mouseSerial;
         do{
             if(!impl_->running||impl_->stopping){const auto error=Error();throw std::runtime_error(error.empty()?"Virtual input stopped during Windows class-driver setup.":error);}
-            if(ClassReady(keyboardSerial,true,reason)&&ClassReady(mouseSerial,false,reason))return;
+            if(!primed&&ClassReady(keyboardSerial,true,reason)&&ClassReady(mouseSerial,false,reason)){
+                const auto current=Vdevice::Get_Info();if(!current)throw std::runtime_error(Impl::Diagnostic("Read virtual keyboard startup state",current));bool found=false;
+                for(const auto& device:current.devices)if(device.id==impl_->keyboard.Id()){neutralTarget=device.inputs_accepted+1;found=true;break;}
+                if(!found||!neutralTarget)throw std::runtime_error("The owned virtual keyboard disappeared during Windows input setup.");
+                {std::lock_guard<std::mutex> lock(impl_->mutex);if(!impl_->SendKeyboard())throw std::runtime_error(impl_->failure.empty()?"Prime the neutral virtual keyboard report failed.":impl_->failure);}
+                primed=true;
+            }
+            if(primed){
+                const auto current=Vdevice::Get_Info();if(!current)throw std::runtime_error(Impl::Diagnostic("Read virtual keyboard startup consumption",current));bool consumed=false;
+                for(const auto& device:current.devices)if(device.id==impl_->keyboard.Id()){consumed=device.inputs_completed>=neutralTarget;break;}
+                if(consumed){if(RawInputDeviceReady(keyboardInstance,true,reason)&&RawInputDeviceReady(mouseInstance,false,reason))return;}
+                else reason="Windows has not consumed the owned keyboard's neutral startup report.";
+            }
             if(std::chrono::steady_clock::now()>=deadline)break;
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }while(true);

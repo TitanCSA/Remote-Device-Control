@@ -1,49 +1,50 @@
-# Validation and practical limits
+# Validation and limits - 0.3.0
 
-Validation performed on 28 October 2026. This is an initial release, not a guarantee for every PC, network, application or graphics driver.
+Validation was performed on 28 October 2026. These checks establish the behavior exercised below; they do not prove zero latency, absence of every vulnerability, or compatibility with every PC, GPU, game or router.
 
-## Automated checks
+## Native builds and offline checks
 
-- Release builds use Windows x64, C++17, static MSVC runtime, `/W4 /WX`, Control Flow Guard, ASLR and DEP. Six native test suites pass.
-- Core: 71,891 assertions covering pinned TLS, identity persistence, bounded messages, credentials, protocol validation and relay video pacing under a simulated producer load. A real TLS response delayed beyond five seconds verifies approval waits honor their longer timeout; closing also interrupts a long read.
-- Input: 131,359 assertions covering both HID descriptors, report encoding, key modifiers, mouse coordinates, transitions and invalid inputs.
-- Capture: 257 checks covering bounded JPEG decoding, malformed data, dimensions and encode/decode round trips.
-- Installer/configuration: 3,028 checks covering ownership, protected legacy migration, full TLS identity preservation, access settings, malformed/truncated data and self-certifying public room identities. The embedded Vdevice setup, host and removal helper are checked against the exact build inputs.
-- LAN discovery: 558 checks covering packet sizes, nonce binding, UTF-8, scope, expiry and host-count bounds. Public directory: 20 native codec/bounds/cancellation checks.
-- All six suites also pass with AddressSanitizer using MSVC 14.44.35207 and its matching runtime. This covers these user-mode tests, not arbitrary kernel or graphics stacks.
-- The relay/directory has 30 automated tests passing on Windows and Linux. These cover consent-only public publication, hidden protected hosts, private-owner isolation, expiry/restart ownership, duplicate viewers, malformed requests, Unicode byte limits and admission bounds. Native Internet fixtures additionally exercise independent input/video channels, large transfers, refused tokens, peer disconnect and cancellation of pending connections.
-- A public-source-only checkout builds without private laboratory helpers or driver source. Building the complete installer additionally requires the documented upstream Vdevice console setup.
+The x64 MSVC Release build and a separate AddressSanitizer build pass all seven native suites. A clean public-source build also passes without an installer payload, private test helpers or driver installation.
 
-## Windows VM checks
+| Suite | Coverage |
+| --- | --- |
+| Core | Actual localhost pinned TLS, identity persistence, bounded configuration/input values, DNS connection, credential-free certificate probe and cancellation of blocked reads |
+| Input | Raw keyboard/mouse descriptors and state, scan mapping, owned-device readiness argument bounds |
+| Discovery | Nonces, bounded packets/lists, UTF-8, subnet restrictions and expiry |
+| Setup | Ownership, command-line quoting, legacy configuration migration, direct firewall plans and LAN defaults |
+| GameStream | HTTP/XML/JSON bounds and error details, real Sunshine version syntax, key mapping, lifecycle and the exact compiled AES-GCM implementation |
+| Codec | Actual synthetic H.264 encode/decode on hardware and forced software paths, orientation/color/crop, padded1080p, malformed data and decoder thread ownership |
+| Engine bundle | Actual in-memory cabinet extraction/validation, sizes, hashes, safe paths, duplicate/prefix collisions and manifest limits |
 
-The live target is an isolated Windows 11 x64 Hyper-V VM with Secure Boot enabled and the unchanged Microsoft-signed Vdevice demo. The physical workstation was not used as an input-injection target.
+The crypto test includes eight concurrent workers, each creating 1,000 independent AES-GCM encrypt/decrypt pairs, plus in-place payload lengths0 through128 and altered authentication tags. The managed engine's separate C++ checks cover200,480 input/control/key-map boundary and randomized cases. These are protocol/parser tests, not a claim that hundreds of thousands of physical devices were tested.
 
-Fresh installation and repair succeed. The host service starts after a normal Windows restart. Real desktop frames are received through both direct LAN and the public HTTPS relay. A separate foreground application confirms a key press, mouse click, wheel notch and expected absolute pointer position. Raw Input also confirms keyboard and mouse traffic.
+The upstream engine source and all local production modifications are pinned and reproducible through `ThirdParty/Sunshine`. The release includes corresponding user-mode source and dependency notices. Vdevice's unchanged signed driver package is embedded by exact hash; no kernel change was made for this release.
 
-The viewer's labelled offline preview was also checked in the interactive VM. F11 expands it to the monitor bounds, a second F11 restores the original bounds, and closing exits successfully. The README image is this offline preview, not a fabricated active connection.
+## Actual disposable-VM qualification
 
-Sequential LAN/relay reconnects pass. Deliberately disconnecting while a key and mouse button are held leaves neither held, removes the owned virtual HID devices and terminates the capture helper. Locking Windows likewise removes those devices and leaves only the idle host service.
+The target was an isolated Windows11 x64 VM with Secure Boot, two virtual CPUs and an interactive console. The original development VMs/base disks were not changed. The target used software H.264 encoding; the controlling workstation used Media Foundation/D3D11 decoding and GPU color conversion with BGRA readback.
 
-Owned-package uninstall was exercised through its requested normal restart and final cleanup. Windows then reports no host/Vdevice services, own firewall rule, configuration, Apps registration or owned application directory. Windows audit and setup logs are intentionally retained.
+Executed checks:
 
-The shared-driver case also passes: keeping Vdevice during removal, reinstalling the host over that existing driver, then uninstalling again preserves Vdevice while removing the host's files, service and configuration.
+- Single-file setup self-check, install and repeated repair passed. The existing shared Vdevice installation was preserved.
+- The actual Sunshine/Moonlight encrypted GameStream session received1920 x1080 video. A representative immediate-input run connected in1,016ms and decoded its first frame in1,204ms, including authorization, virtual-device creation and stream setup.
+- Immediately after that first frame, without an added warmup, Windows Raw Input/application messages recorded a key down/up, one application key press, one left click, one wheel notch and pointer motion. Held key/button state was zero after disconnect.
+- A second controller was refused while the first continued receiving video for20 seconds.
+- An incorrect certificate pin was refused before HTTP; an incorrect access code returned HTTP403. Fresh unregistered client certificates received GameStream XML status401 for protected application-list/cancel requests. HTTP200 with XML401 is the protocol's application-level denial, not an accepted request.
+- In code-free approval mode, choosing No on the target produced an explicit403 with the local refusal/timeout explanation and no stream. Choosing Yes subsequently started the encrypted video session.
+- Locking Windows ended sharing; the engine and all owned input devices disappeared while the automatic wrapper service stayed running. Unlocking restarted the engine.
+- The normal-user viewer preview opened correctly in the VM; F11 filled the1024 x768 monitor, restored the original window bounds and closed cleanly. Offscreen native checks also covered1280 x820 and840 x520 toolbar/sidebar geometry.
+- Uninstall returned success and removed the program/state directories, host service, Apps entry, identity registration and firewall rules. No engine process remained; the preexisting shared Vdevice installation kept running. Windows audit/history was preserved.
+- A deliberately unrecognized legacy test file was retained and reported during engine repair; the installer did not delete it as owned engine data.
 
-Public access was exercised with the actual Internet directory and Windows 11 target. No virtual HID device exists while approval is pending. Clicking No and ignoring a request both prevent access. Clicking Yes enables real desktop/control traffic; a second pending or active controller is refused. Automatic mode also connects without a code through both LAN transport and the Internet relay, and disconnect neutralizes held input and removes the virtual devices.
+The software-encoded VM reported roughly32 decoded FPS and1ms control-network RTT in these runs. This is a functional test environment, **not a physical-PC performance benchmark**. First-frame startup time and network RTT are not mouse-to-game, key-to-application or input-to-photon latency measurements. The current renderer includes GPU-to-CPU readback and a later Direct2D upload; it is not zero-copy.
 
-The laboratory base contained obsolete third-party keyboard/mouse mapper packages. They prevented Windows from starting the virtual HID children even though USB enumeration succeeded. Removing those packages in the disposable VM restored input. The application now checks its exact owned HID class children during startup and reports their PnP problem/service if they fail; it does not remove other drivers.
+## Network and deployment scope
 
-Observed input acknowledgement round trips were approximately **1 ms over the virtual LAN** and **43 ms through the Internet relay** during these runs. These are individual environment-specific observations, not guaranteed percentiles or input-to-display measurements. An acknowledgement means the host accepted the reports; receiving applications and display refresh add further delay.
+The old dedicated relay/directory service, its routes and runtime were removed. Its endpoints return404 and its old loopback port is closed; the separate website and licensing service remain available. The new application contains no central relay, Internet directory, licensing request or fallback path.
 
-An independent synthetic 720p image benchmark observed JPEG encoding around 1.9 ms and decoding around 1.7 ms at the median on the development PC. It does not measure real desktop capture, a GPU pipeline or total remote-control latency.
+Direct Internet/UPnP and router/NAT behavior have not been qualified across physical routers, CGNAT, IPv6 providers or remote WANs. A reachable address and permitted inbound GameStream ports are required. Private/Domain LAN rules and code protection are defaults; Internet exposure and code-free access are separate administrator choices.
 
-## Scope
+Windows10/11 x64 is the intended platform, but the end-to-end VM run above was Windows11. Hardware encoders, different GPUs, HDR, protected video and every Windows installation are not universally qualified. The supported media scope is SDR H.264, primary interactive unlocked console, up to1920 x1080. Audio, controller forwarding, clipboard/file transfer and secure-desktop sharing are outside this version.
 
-Only an unlocked, signed-in primary console desktop is shared. Locking, logging out, changing to a secure desktop or losing the capture helper ends the session. UAC secure-desktop control, the Windows sign-in screen, multi-monitor selection, audio, clipboard and file transfer are not implemented.
-
-Screen encoding currently uses CPU JPEG with DXGI capture or a GDI fallback. It is suitable for desktop control and debugging; hardware video encoding and a controlled physical input-to-photon measurement remain future work. Frame rate and bandwidth depend on screen activity, resolution, CPU and network conditions.
-
-Relay video is paced below the server's bandwidth allowance. The sender waits before selecting the newest frame, keeping obsolete captures out of an accumulating network queue. LAN video has no added pacing; input has a separate connection and bandwidth budget.
-
-Windows 10 2004+ is a build target. The live installation/control test described here used Windows 11; other Windows builds and physical GPU/network combinations still need field testing. The public relay is bounded and best-effort, and is not a high-availability service.
-
-The Vdevice demo's shared one-hour allowance remains enforced by its existing driver. No new kernel binary was built or modified for this application.
+The Vdevice demo remains one hour per Windows kernel boot. Closing or reinstalling this app does not reset it. Uninstall preserves shared Vdevice and Windows' own audit/security/SetupAPI records. Unknown files are retained and reported rather than deleted.

@@ -1,6 +1,4 @@
 #include "CaptureAgent.h"
-#include "Capture.h"
-#include "FrameCodec.h"
 #include "Config.h"
 #include <windows.h>
 #include <wtsapi32.h>
@@ -20,8 +18,8 @@
 namespace RemoteControl {
 namespace {
 constexpr wchar_t PipePrefix[]=L"\\\\.\\pipe\\RemoteDeviceControl-Capture-";
-constexpr uint32_t PipeMagic=0x31414352,PipeVersion=1;
-enum:uint32_t {JpegPacket=1,UnavailablePacket=2,HeartbeatPacket=3,DisconnectPacket=4};
+constexpr uint32_t PipeMagic=0x32414952,PipeVersion=2;
+enum:uint32_t {ReadyPacket=1,UnavailablePacket=2,HeartbeatPacket=3,DisconnectPacket=4};
 struct Header {
     uint32_t magic=PipeMagic,version=PipeVersion,type=0,bytes=0,width=0,height=0,reserved0=0,reserved1=0;
     uint64_t sequence=0,capturedQpc=0;
@@ -119,34 +117,27 @@ std::string SafeError(std::string error){
 }
 struct Session {
     Handle pipe,process,job,stop{CreateEventW(nullptr,TRUE,FALSE,nullptr)},done{CreateEventW(nullptr,TRUE,FALSE,nullptr)};
-    std::atomic<bool> available{false},stopping{false},ended{false},observedStatus{false};std::mutex mutex;std::condition_variable changed;EncodedFrame latest;
+    std::atomic<bool> available{false},stopping{false},ended{false},observedStatus{false};std::mutex mutex;std::condition_variable changed;
     std::string error="Waiting for the active desktop capture helper.";
     Session(){Require(stop.value&&done.value,"Capture session event creation");}
     void Note(std::string text,bool ready=false){
-        {std::lock_guard<std::mutex> lock(mutex);error=std::move(text);available=ready;observedStatus=true;if(!ready)latest={};}changed.notify_all();
+        {std::lock_guard<std::mutex> lock(mutex);error=std::move(text);available=ready;observedStatus=true;}changed.notify_all();
     }
     void Failed(std::string text){
-        {std::lock_guard<std::mutex> lock(mutex);if(available||error.empty()||error=="Waiting for the active desktop capture helper.")error=std::move(text);available=false;observedStatus=true;latest={};}changed.notify_all();
+        {std::lock_guard<std::mutex> lock(mutex);if(available||error.empty()||error=="Waiting for the active desktop capture helper.")error=std::move(text);available=false;observedStatus=true;}changed.notify_all();
     }
     void Run()noexcept{
         try{
-            uint64_t lastSequence=0;
             while(!stopping){
                 const ULONGLONG deadline=GetTickCount64()+5000;Header header;Read(pipe.value,stop.value,&header,sizeof(header),deadline);
                 if(header.magic!=PipeMagic||header.version!=PipeVersion||header.reserved0||header.reserved1)throw std::runtime_error("Capture helper packet header is invalid.");
-                if(header.type==JpegPacket){
-                    if(!header.width||header.width>MaxWidth||!header.height||header.height>MaxHeight||header.bytes<4||header.bytes>MaxFrameBytes||!header.sequence||header.sequence<=lastSequence||!header.capturedQpc)throw std::runtime_error("Capture helper frame metadata exceeds its bounds.");
-                    EncodedFrame frame;frame.width=header.width;frame.height=header.height;frame.sequence=header.sequence;frame.capturedQpc=header.capturedQpc;frame.jpeg.resize(header.bytes);
-                    Read(pipe.value,stop.value,frame.jpeg.data(),header.bytes,deadline);
-                    if(frame.jpeg[0]!=0xff||frame.jpeg[1]!=0xd8)throw std::runtime_error("Capture helper did not send a JPEG image.");
-                    lastSequence=header.sequence;
-                    {std::lock_guard<std::mutex> lock(mutex);latest=std::move(frame);error.clear();observedStatus=false;available=true;}changed.notify_all();
-                }else{
+                {
                     if(header.width||header.height||header.sequence||header.capturedQpc)throw std::runtime_error("Capture helper status contains frame fields.");
                     if(header.type==UnavailablePacket){
                         if(!header.bytes||header.bytes>512)throw std::runtime_error("Capture helper status exceeds its bounds.");
                         std::string text(header.bytes,'\0');Read(pipe.value,stop.value,text.data(),header.bytes,deadline);Note(SafeError(std::move(text)));
-                    }else if(header.type==HeartbeatPacket){if(header.bytes)throw std::runtime_error("Capture heartbeat has an unexpected body.");}
+                    }else if(header.type==ReadyPacket){if(header.bytes)throw std::runtime_error("Indicator readiness has an unexpected body.");Note("",true);}
+                    else if(header.type==HeartbeatPacket){if(header.bytes)throw std::runtime_error("Indicator heartbeat has an unexpected body.");}
                     else if(header.type==DisconnectPacket){if(header.bytes)throw std::runtime_error("Capture disconnect has an unexpected body.");throw std::runtime_error("The local user disconnected the remote-control session.");}
                     else throw std::runtime_error("Unknown capture helper message.");
                 }
@@ -202,27 +193,17 @@ struct AgentState {
     ~AgentState(){End();if(worker.joinable())worker.join();if(window&&IsWindow(window))DestroyWindow(window);}
     bool ShowIcon(bool balloon){
         icon={};icon.cbSize=sizeof(icon);icon.hWnd=window;icon.uID=1;icon.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;icon.uCallbackMessage=TrayEvent;icon.hIcon=LoadIconW(nullptr,IDI_APPLICATION);
-        wcscpy_s(icon.szTip,L"Remote Device Control - remote control active");
-        if(balloon){icon.uFlags|=NIF_INFO;wcscpy_s(icon.szInfoTitle,L"Remote control active");wcscpy_s(icon.szInfo,L"Your desktop is being shared. Click this icon to disconnect the remote session.");icon.dwInfoFlags=NIIF_INFO;}
+        wcscpy_s(icon.szTip,L"Remote Device Control - host available");
+        if(balloon){icon.uFlags|=NIF_INFO;wcscpy_s(icon.szInfoTitle,L"Remote control available");wcscpy_s(icon.szInfo,L"This PC accepts remote-control connections under your chosen access policy. Click this icon to disconnect or pause access.");icon.dwInfoFlags=NIIF_INFO;}
         return Shell_NotifyIconW(NIM_ADD,&icon)!=FALSE;
     }
     void End()noexcept{if(stop.value)SetEvent(stop.value);std::lock_guard<std::mutex> lock(pipeMutex);if(pipe.value)CancelIoEx(pipe.value,nullptr);}
     void ClosePipe()noexcept{std::lock_guard<std::mutex> lock(pipeMutex);pipe.Reset();}
     void Run()noexcept{
         try{
-            Capture capture;FrameCodec codec;Frame frame;uint64_t lastNotice=0;std::string lastError;
-            while(WaitForSingleObject(stop.value,0)!=WAIT_OBJECT_0){
-                try{
-                    if(capture.Next(frame,100)){
-                        auto jpeg=codec.Encode(frame);Header header;header.type=JpegPacket;header.bytes=static_cast<uint32_t>(jpeg.size());header.width=frame.width;header.height=frame.height;header.sequence=frame.sequence;header.capturedQpc=frame.capturedQpc;
-                        Send(pipe.value,stop.value,header,jpeg.data());lastNotice=GetTickCount64();lastError.clear();
-                    }else if(GetTickCount64()-lastNotice>=500){Header header;header.type=HeartbeatPacket;Send(pipe.value,stop.value,header);lastNotice=GetTickCount64();}
-                }catch(const std::exception& failure){
-                    if(WaitForSingleObject(stop.value,0)==WAIT_OBJECT_0)break;
-                    const std::string text=SafeError(failure.what());
-                    if(text!=lastError||GetTickCount64()-lastNotice>=1000){Header header;header.type=UnavailablePacket;header.bytes=static_cast<uint32_t>(text.size());Send(pipe.value,stop.value,header,text.data());lastError=text;lastNotice=GetTickCount64();}
-                    if(WaitForSingleObject(stop.value,250)==WAIT_OBJECT_0)break;
-                }
+            Header ready;ready.type=ReadyPacket;Send(pipe.value,stop.value,ready);
+            while(WaitForSingleObject(stop.value,1000)==WAIT_TIMEOUT){
+                Header heartbeat;heartbeat.type=HeartbeatPacket;Send(pipe.value,stop.value,heartbeat);
             }
         }catch(const PipeClosed&){/* The service ended the authorized session. */}
         catch(const std::exception& failure){
@@ -247,7 +228,7 @@ LRESULT CALLBACK AgentWindow(HWND window,UINT message,WPARAM wParam,LPARAM lPara
     switch(message){
     case TrayEvent:
         if(lParam==WM_LBUTTONUP||lParam==WM_RBUTTONUP||lParam==NIN_KEYSELECT){
-            HMENU menu=CreatePopupMenu();if(menu){AppendMenuW(menu,MF_STRING|MF_DISABLED,0,L"Remote control active");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,1,L"Disconnect remote session");POINT point{};GetCursorPos(&point);SetForegroundWindow(window);const UINT chosen=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window,nullptr);DestroyMenu(menu);if(chosen==1){state->End();PostMessageW(window,WM_CLOSE,0,0);}}}return 0;
+            HMENU menu=CreatePopupMenu();if(menu){AppendMenuW(menu,MF_STRING|MF_DISABLED,0,L"Remote control available");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,1,L"Disconnect and pause access for 30 seconds");POINT point{};GetCursorPos(&point);SetForegroundWindow(window);const UINT chosen=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window,nullptr);DestroyMenu(menu);if(chosen==1){state->End();PostMessageW(window,WM_CLOSE,0,0);}}}return 0;
     case WM_QUERYENDSESSION:return TRUE;
     case WM_ENDSESSION:if(wParam){state->End();PostMessageW(window,WM_CLOSE,0,0);}return 0;
     case WM_CLOSE:state->End();DestroyWindow(window);return 0;
@@ -257,7 +238,7 @@ LRESULT CALLBACK AgentWindow(HWND window,UINT message,WPARAM wParam,LPARAM lPara
 }
 }
 
-struct SessionCapture::State {
+struct SessionIndicator::State {
     std::mutex lifecycle,lastMutex;std::shared_ptr<Session> current;std::thread reader;std::string lastError="Capture is not running.";
     void StopLocked()noexcept{
         auto session=std::atomic_load(&current);if(!session)return;
@@ -272,23 +253,23 @@ struct SessionCapture::State {
         std::atomic_store(&current,std::shared_ptr<Session>{});
     }
 };
-SessionCapture::SessionCapture():state_(std::make_unique<State>()){}
-SessionCapture::~SessionCapture(){Stop();}
-void SessionCapture::Start(uint32_t sessionId){
+SessionIndicator::SessionIndicator():state_(std::make_unique<State>()){}
+SessionIndicator::~SessionIndicator(){Stop();}
+void SessionIndicator::Start(uint32_t sessionId){
     std::lock_guard<std::mutex> lock(state_->lifecycle);state_->StopLocked();auto session=std::make_shared<Session>();std::atomic_store(&state_->current,session);
     try{Launch(*session,sessionId,PipeName());state_->reader=std::thread([session]{session->Run();});}
     catch(const std::exception& failure){session->Note(failure.what());state_->StopLocked();throw;}
     catch(...){session->Note("Capture helper could not start due to a local resource error.");state_->StopLocked();throw;}
 }
-void SessionCapture::Stop()noexcept{try{std::lock_guard<std::mutex> lock(state_->lifecycle);state_->StopLocked();}catch(...){}}
-bool SessionCapture::Latest(EncodedFrame& frame,uint64_t afterSequence,uint32_t timeoutMs){
-    if(timeoutMs>30000)throw std::runtime_error("Capture frame wait must be from 0 to 30000 milliseconds.");
+void SessionIndicator::Stop()noexcept{try{std::lock_guard<std::mutex> lock(state_->lifecycle);state_->StopLocked();}catch(...){}}
+bool SessionIndicator::WaitReady(uint32_t timeoutMs){
     auto session=std::atomic_load(&state_->current);if(!session)return false;
-    std::unique_lock<std::mutex> lock(session->mutex);session->changed.wait_for(lock,std::chrono::milliseconds(timeoutMs),[&]{return session->stopping||session->ended||(!session->available&&session->observedStatus)||(session->available&&session->latest.sequence>afterSequence);});
-    if(session->stopping||!session->available||session->latest.sequence<=afterSequence)return false;frame=session->latest;return true;
+    std::unique_lock<std::mutex> lock(session->mutex);
+    session->changed.wait_for(lock,std::chrono::milliseconds(timeoutMs),[&]{return session->observedStatus||session->ended||session->stopping;});
+    return session->available&&!session->stopping&&!session->ended;
 }
-bool SessionCapture::Available()const noexcept{auto session=std::atomic_load(&state_->current);return session&&session->available&&!session->stopping;}
-std::string SessionCapture::Error()const{
+bool SessionIndicator::Available()const noexcept{auto session=std::atomic_load(&state_->current);return session&&session->available&&!session->stopping&&!session->ended;}
+std::string SessionIndicator::Error()const{
     auto session=std::atomic_load(&state_->current);if(session){std::lock_guard<std::mutex> lock(session->mutex);return session->error;}
     std::lock_guard<std::mutex> lock(state_->lastMutex);return state_->lastError;
 }

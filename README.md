@@ -1,69 +1,80 @@
-# Remote Device Control — Windows Remote Desktop with Vdevice Input
+# Remote Device Control - direct Windows remote desktop
 
-Control an authorized Windows PC using a **portable C++ viewer** and a **single-file host installer**. Screen updates and keyboard/mouse input use separate, authenticated, encrypted channels. The host creates a real virtual USB keyboard and absolute mouse with **[Vdevice](https://github.com/TitanCSA/Vdevice)**.
+A portable C++ viewer and a single-file host installer. The host uses **[Sunshine](https://github.com/LizardByte/Sunshine)** for desktop capture/encoding and **[Vdevice](https://github.com/TitanCSA/Vdevice)** for real virtual USB keyboard and mouse input. The viewer uses **[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)** for GameStream transport.
 
-**[Download](https://github.com/TitanCSA/Remote-Device-Control/releases/latest)** · [How it works](docs/ARCHITECTURE.md) · [Tests and limits](docs/VALIDATION.md)
+**[Download](https://github.com/TitanCSA/Remote-Device-Control/releases/latest)** | [Architecture](docs/ARCHITECTURE.md) | [Validation and limits](docs/VALIDATION.md)
 
-![Portable viewer, shown in its labelled offline preview](docs/viewer-preview.png)
+![Viewer preview in the test VM; no connection active](docs/viewer-preview.png)
 
-## Connect
+## Install and connect
 
-On the **target PC**:
+**Target PC**
 
-1. Run **RemoteDeviceControlSetup.exe** and accept elevation. Keep code protection, or enable **public connections without a code**. When asked, choose **Yes** to approve each incoming connection locally, or **No** for automatic access.
-2. Choose **Install / repair**. Keep **Internet relay** enabled for Internet connections and the public Internet list. Restart only if requested, then sign in and keep the desktop unlocked.
-3. With code protection, choose **Copy connection code** and share it privately with the intended controller. With public access, the PC appears automatically in the viewer.
+1. Run `RemoteDeviceControlSetup.exe` as administrator and choose **Install / repair**. It installs the host engine, one automatic service, and the unchanged Microsoft-signed Vdevice demo when needed.
+2. Keep code protection, or choose code-free access with local approval. Restart Windows only if requested, then sign in and keep the console desktop unlocked.
+3. For protected access, copy the connection code and share it privately. Code-free hosts appear in the viewer's **local network** list.
 
-On the **controlling PC**:
+**Controlling PC**
 
-1. Run **RemoteDeviceControl.exe**. No installation, driver or administrator rights are required here.
-2. Select a PC under **Available PCs** and choose **Connect selected PC**, or double-click it. For a protected PC, paste its private code and choose **Connect** above the list.
-3. Click the remote desktop to control it. **Ctrl+Alt+F12** releases keyboard capture; **F11** toggles full screen. Disconnect releases held input and removes the session's virtual devices.
+1. Run `RemoteDeviceControl.exe`. No installation, driver or administrator rights are needed here.
+2. Select a local PC, paste its private connection code, or enter its IP address / DNS name for code-free access. Confirm the target certificate when connecting to a new manually entered address.
+3. Click the remote desktop to control it. **Ctrl+Alt+F12** releases capture; **F11** toggles full screen. Disconnect releases held keys/buttons and removes the session's virtual devices.
 
-One controller or pending request is allowed at a time. Busy PCs refuse additional connections. In approval mode the person on the target chooses Yes or No; an unanswered request expires after 25 seconds. Capture and virtual input start only after acceptance. Switching off approval enables immediate access.
+There is one pending or active controller per target. In approval mode, each connection must be accepted on the target within 25 seconds. The target has a visible tray indicator with a command to disconnect and pause access for 30 seconds.
 
-**Public access without approval lets anyone who can see the PC in this application control its unlocked desktop.** Public Internet discovery is visible to all viewers. Code protection remains the default; protected PCs are never listed. The public list includes the PC name, availability and approval setting. The connection code grants private access; treat it like a password.
+**Code-free access without local approval allows anyone who can reach the host to control its unlocked desktop.** Use a private code or retain approval on untrusted networks. Keep the private connection code secret.
 
-The target displays a tray indicator during sharing, with a **Disconnect** command. The installed service starts with Windows and preserves the selected access mode. Install the updated host and viewer together to use public discovery and approval requests.
+## Direct LAN and Internet
 
-## LAN and Internet
+There is **no central relay, account server or Internet PC directory**. Desktop and input travel directly between the two PCs using Sunshine/Moonlight's GameStream streaming stack. The old relay and directory are no longer used.
 
-- **LAN direct:** IPv4 TCP port **48761**, with UDP **48762** for opt-in discovery. Setup uses executable-scoped **Private/Domain** profile rules restricted to the local subnet. Discovery runs only on those trusted interfaces. It does not change your network profile, router or security settings. Code-free Internet connections still work through the relay when LAN discovery is unavailable.
-- **Internet relay:** outbound HTTPS/WebSocket connections through `licences.configcsa.com`. No router port forwarding is required. A separate pinned TLS session runs end to end, so the relay forwards ciphertext without the host's private key or pairing secret.
-- The public relay has bounded admission, session lifetime and bandwidth. It is a best-effort service; Internet distance, congestion and firewalls still affect latency and availability. Relay source is included for self-hosting.
+LAN discovery uses UDP **48762** on Private/Domain interfaces and local subnets. Only explicitly code-free hosts are advertised. Private hosts remain unlisted.
 
-## Vdevice demo
+For Internet access, enable **Direct Internet / UPnP** on the target and connect using its reachable public IP or DNS name. UPnP must be supported and allowed by the router; otherwise forward the required ports manually. CGNAT, double NAT and restrictive firewalls can prevent direct access. There is no automatic relay fallback. A private code has the form `RDC3;HOST;...`: for Internet access, replace only `HOST` with the reachable public IP/DNS name; keep the certificate pin and other fields unchanged. Existing relay-enabled installations migrate to LAN-only until direct Internet access is explicitly enabled.
 
-The included, unchanged **Microsoft-signed Vdevice 1.0.5.0 demo** has **one hour per Windows kernel boot**, shared with other Vdevice applications. The allowance starts when a virtual device is first created, rather than when the host service starts. Closing or reinstalling does not reset it. Expiry ends control; use Windows **Restart** for a new allowance.
+| Host port | Purpose |
+| --- | --- |
+| TCP 48784 | HTTPS authorization and GameStream control |
+| TCP 48789 | GameStream HTTP service information |
+| TCP 48810 | RTSP stream setup |
+| UDP 48798, 48799, 48800, 48802 | GameStream video, encrypted control/input and protocol media ports |
+| UDP 48762 | Local discovery only; do not forward this port |
 
-The viewer displays the remaining allowance and input acknowledgement roundtrip. An acknowledgement means the host accepted input reports; it does **not** measure the time a game, application or display takes to react.
-
-## Remove the host
-
-Open the host installer or **Windows Settings → Apps → Remote Device Control**, then choose **Uninstall**. It removes this project's service, firewall rules, public listing, configuration, registration and owned application files. A listing whose host disappears unexpectedly expires automatically.
-
-Vdevice that was already installed is preserved. When this installer originally installed Vdevice, the removal UI offers a separate driver checkbox: leave it unchecked if other applications now need the shared driver. Windows may require a restart for the resident demo clock or Driver Store cleanup. If package removal is deferred, setup explains the remaining step; it retains only the removal tools needed to finish after restart. Unexpected files are retained and reported.
-
-Windows' own event, security and SetupAPI records are preserved. This project does not attempt to erase audit history or promise an untraceable uninstall.
+The default firewall policy restricts access to Private/Domain local subnets. Internet access is a separate administrator choice. The Sunshine configuration website and legacy PIN-pairing endpoints are disabled in this managed host. The initial authorization is specific to this application; it is not a promise that an unmodified Moonlight application can pair with it.
 
 ## Performance and scope
 
-Capture uses persistent **DXGI Desktop Duplication** resources with an explicit GDI compatibility fallback. Frames are independently encoded with **WIC JPEG** and presented through **Direct2D**. Only the latest waiting frame is retained; slow video does not queue keyboard input behind images. Pointer motion may be coalesced while key/button transitions remain ordered and bounded.
+Sunshine captures the desktop and selects a supported hardware H.264 encoder (NVENC, AMF or Intel Quick Sync), with software fallback. The viewer receives RTP/UDP video through Moonlight's loss recovery and decodes H.264 with Windows Media Foundation. Hardware decoding is used when available. A dedicated pull-renderer thread consumes complete access units, and the UI displays the latest decoded frame.
 
-This version uses **CPU JPEG, not hardware H.264**. Display refresh, encoding, bandwidth and Windows scheduling determine the actual frame rate and delay. It does not promise zero latency or compatibility with every graphics stack.
+Keyboard and mouse use GameStream's encrypted control/input channel, separately from the video stream. The host submits raw HID reports through Vdevice: an NKRO keyboard, an absolute desktop mouse and a relative mouse. It does not fall back to Windows `SendInput`.
 
-Windows 10 2004+ / Windows 11 **x64**, primary monitor, at most 1920×1080. Control targets the active, signed-in console desktop. Locked/logged-out, UAC secure desktops and unrelated RDP sessions are not shared; reconnect after returning to an available desktop. Audio, clipboard synchronization, file transfer and a custom Ctrl+Alt+Delete command are not implemented. The viewer refuses a connection to its own installed host to prevent an input feedback loop.
+Hardware capabilities, display refresh, encoding, decoding, frame presentation, Windows scheduling and the network still determine latency. The displayed control RTT measures a network round trip; it is not an input-to-photon or game-reaction measurement. The current renderer converts decoded output to CPU BGRA before Direct2D presentation; it is not a zero-copy GPU renderer.
+
+Supported scope: Windows 10 2004+ / Windows 11 **x64**, active signed-in unlocked console desktop, SDR H.264 up to 1920 x 1080. Audio, clipboard/file transfer, controller forwarding and secure-desktop control are not implemented. Locking/logging out ends sharing. The viewer refuses its own locally installed host to prevent an input feedback loop.
+
+## Vdevice demo and removal
+
+The included **Microsoft-signed Vdevice 1.0.5.0 demo** allows **one hour per Windows kernel boot**, shared with other Vdevice applications, starting with the first virtual-device creation. Expiry stops control. Closing/reinstalling does not reset it; use Windows **Restart** for a new allowance. Microsoft signing covers the upstream kernel package, not these application EXEs.
+
+Open setup or **Windows Settings > Apps > Remote Device Control**, then choose **Uninstall**. The host, owned engine, service, firewall rules, settings and registration are removed. A preexisting/shared Vdevice installation is preserved; removing an app-installed driver is optional and can require a restart. Unexpected files are retained and reported. Windows event/security/SetupAPI records remain.
 
 ## Build
 
-Use Visual Studio 2022 Desktop C++, a Windows SDK, CMake and .NET Framework already supplied by the supported Windows installation for the upstream Vdevice setup:
+Install Visual Studio 2022 Desktop C++, a Windows SDK, CMake, Python 3.9+ and Git. Fetch the exact pinned viewer dependencies and build:
 
 ```powershell
-.\Build.ps1 -VdeviceSetup C:\Downloads\VdeviceSetupConsole.exe
+python Tools/Prepare-Moonlight.py
+.\Build.ps1 -TestsOnly
+.\Build.ps1
 ```
 
-Supply the matching **1.0.5.0** console setup from the [Vdevice release](https://github.com/TitanCSA/Vdevice/releases). The host installer embeds it unchanged. Native application builds use the static MSVC runtime. `-TestsOnly` builds offline protocol/input/image tests; no setup, capture, service or input operation is performed by these tests.
+A plain source build produces the portable viewer and host wrapper. Building the single-file installer additionally requires the matching unchanged [Vdevice 1.0.5.0 console setup](https://github.com/TitanCSA/Vdevice/releases) and the Sunshine engine cabinet/manifest:
 
-The C++ application, viewer, installer, raw two-file Vdevice SDK and relay source are included. **Kernel source and signing material are excluded.** Microsoft signing covers the upstream kernel package, not the newly built application EXEs.
+```powershell
+.\Build.ps1 -VdeviceSetup C:\Downloads\VdeviceSetupConsole.exe `
+  -EngineCab C:\Build\Engine.cab -EngineManifest C:\Build\Engine.manifest
+```
 
-Source is MIT; original acknowledgements are retained under `licenses/`. Vdevice binaries have their own distribution/demo terms. Use only on systems whose owner has authorized remote access, in compliance with applicable laws and service rules. The software is provided as-is; its authors do not accept responsibility for unlawful or unauthorized use, to the extent permitted by law.
+See [the engine integration and reproducible source instructions](ThirdParty/Sunshine/README.md). Application code, Vdevice's raw two-file SDK, upstream pins and integration patches are included. **Vdevice kernel source and signing secrets are excluded.**
+
+The combined application is distributed under **GPL-3.0**, with retained upstream MIT/BSD/Apache notices in `licenses/`. The independently supplied Vdevice driver has separate demo binary terms. Use only on computers whose owner has authorized remote control. The software is provided as-is, without a zero-latency, universal-compatibility or bug-free guarantee.

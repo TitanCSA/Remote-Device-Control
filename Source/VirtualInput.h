@@ -8,6 +8,10 @@ namespace RemoteControl {
 // Windows Set-1 make scan code, with E0 expressed separately. Unsupported
 // consumer/vendor keys return zero. Handle VK_PAUSE explicitly in the viewer.
 uint32_t UsageFromScan(uint32_t scan,bool extended) noexcept;
+// Startup-only, nonblocking check: require the started class child and a Raw
+// Input interface whose devnode ancestry reaches this exact owned USB instance.
+// Pass the complete per-session USB instance, not merely a VID/PID or serial.
+bool RawInputDeviceReady(const std::wstring& ownedUsbInstance,bool keyboard,std::string& reason);
 
 namespace InputProtocol {
 struct HidState {

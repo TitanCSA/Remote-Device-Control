@@ -51,6 +51,11 @@ int main(){
         Check(UsageFromScan(0x5b,true)==0xe3&&UsageFromScan(0x5c,true)==0xe7,"Windows modifiers mapping");
         Check(UsageFromScan(0x76,false)==0x73,"F24 mapping");
         Check(UsageFromScan(999,false)==0&&UsageFromScan(0,true)==0,"Unsupported scan handling");
+        // A VID/PID, partial instance or embedded terminator must never be
+        // accepted as ownership evidence (all fail before Windows enumeration).
+        for(const auto& instance:std::vector<std::wstring>{L"",L"USB\\",L"USB\\VID_FFFF&PID_0021",L"USB\\VID_FFFF&PID_0021\\",L"USB\\VID_FFFF&PID_0021\\serial\\extra",L"USB\\VID_FFFF&PID_0021\\"+std::wstring(200,L'X'),std::wstring(L"USB\\VID_FFFF&PID_0021\\bad")+std::wstring(1,L'\0')+L"tail"}){
+            std::string reason;Check(!RawInputDeviceReady(instance,true,reason)&&reason=="An exact bounded owned USB instance is required for Windows input readiness.","Partial/unbounded input identity accepted");
+        }
         // Construct/destruct without Start must never open the driver or create a device.
         {VirtualInput input;Check(!input.Running(),"Input started before authentication");input.Release();input.Stop();}
         std::cout<<"PASS: "<<checks<<" offline descriptor, NKRO, pointer, input-bounds and scan-map checks; no driver opened.\n";

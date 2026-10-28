@@ -1,0 +1,18 @@
+Vdevice user-mode code and documentation: Copyright (c) 2026 TitanCSA, MIT.
+The kernel driver is distributed only as a signed demo binary; see BINARY-LICENSE.txt.
+
+The example USB descriptors and selected DS4 feature/power-up data are derived
+from nefarius/ViGEmBus, Copyright (c) 2018-2022 Nefarius Software Solutions e.U.
+and Contributors, BSD-3-Clause. The complete license is in ViGEmBus.txt.
+https://github.com/nefarius/ViGEmBus
+
+The example GIP metadata and protocol definitions implement Microsoft
+[MS-GIPUSB], including adaptations for a USB-only virtual gamepad.
+Copyright Microsoft Corporation. The Open Specifications documentation permits
+redistribution of included code samples, modified or unmodified, in implementations.
+https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gipusb/e7c90904-5e21-426e-b9ad-d82adeee0dbc
+
+Xbox, Xbox 360, Xbox One, XInput, Windows, PlayStation and DualShock are their
+respective owners' marks. This independent project is not endorsed by Microsoft,
+Sony, Nefarius or the ViGEm project. No firmware keys or authentication certificates
+are included. Example device identities describe protocol compatibility, not origin.

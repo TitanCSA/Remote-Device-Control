@@ -1,0 +1,27 @@
+Vdevice demo driver — binary distribution terms
+Copyright (c) 2026 TitanCSA. All rights reserved.
+
+These terms cover the prebuilt Vdevice kernel driver, INF and signed catalog.
+The MIT source license does not grant rights to the kernel source code or the
+unrestricted edition. Third-party source notices remain applicable separately.
+
+You may install and use this demo, and redistribute complete, unmodified demo
+packages with these terms and supplied notices. Keep signatures, catalogs,
+integrity manifests and the demo limitation intact. This does not grant a right
+to redistribute the unrestricted edition.
+
+The shared demo allowance lasts one hour per Windows kernel boot, starting
+with the first successful virtual-device creation. Expiry disconnects virtual
+devices and refuses creation and transfers until Windows Restart. Closing an
+application or reinstalling the driver does not reset the allowance; sleep
+counts toward it. Support for every USB protocol or device is not guaranteed.
+
+For the unrestricted version, DM titancsa on Discord.
+
+THE DEMO IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+TO THE EXTENT PERMITTED BY LAW, THE AUTHOR IS NOT LIABLE FOR CLAIMS OR DAMAGES
+ARISING FROM ITS USE.
+
+Microsoft's signature covers the driver package; it does not change ownership
+or license the binaries under MIT, and does not sign the installer/example EXEs.

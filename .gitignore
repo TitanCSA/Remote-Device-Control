@@ -1,0 +1,17 @@
+/obj/
+/bin/
+/.vs/
+*.user
+*.pdb
+*.ilk
+*.log
+*.dmp
+*.pfx
+*.key
+*.pem
+__pycache__/
+.venv/
+/Tools/Prepare-Transport.py
+/Tests/LabPairing.cpp
+/Tests/LiveProbe.cpp
+/Tests/Observer.cpp

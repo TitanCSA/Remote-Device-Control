@@ -114,10 +114,11 @@ struct State:std::enable_shared_from_this<State> {
         if(ws)WinHttpCloseHandle(ws);
         if(req)WinHttpCloseHandle(req);
     }
-    void Initialize(std::wstring_view url,std::string_view room,std::string_view token,std::string_view role,std::string_view channel) {
+    void Initialize(std::wstring_view url,std::string_view room,std::string_view token,std::string_view role,std::string_view channel,std::string_view hostKey) {
         if(cancelled&&cancelled())Fail("Relay connection cancelled",ERROR_OPERATION_ABORTED);
         if(url.size()>2048||url.find(L'\0')!=url.npos||url.substr(0,6)!=L"wss://")throw std::runtime_error("Use an absolute wss:// relay URL.");
         if(!Hex(room,32)||!Hex(token,64)||(role!="host"&&role!="viewer")||(channel!="video"&&channel!="input"))throw std::runtime_error("Invalid relay pairing parameters.");
+        if(!hostKey.empty()&&(role!="host"||!Hex(hostKey,64)))throw std::runtime_error("Invalid private relay host identity.");
         std::wstring https=L"https://"+std::wstring(url.substr(6));URL_COMPONENTS parts{};parts.dwStructSize=sizeof(parts);
         parts.dwHostNameLength=parts.dwUrlPathLength=parts.dwExtraInfoLength=parts.dwUserNameLength=parts.dwPasswordLength=static_cast<DWORD>(-1);
         Require(WinHttpCrackUrl(https.c_str(),static_cast<DWORD>(https.size()),0,&parts),"Relay URL parsing");
@@ -139,7 +140,8 @@ struct State:std::enable_shared_from_this<State> {
         DWORD disabled=WINHTTP_DISABLE_COOKIES|WINHTTP_DISABLE_AUTHENTICATION|WINHTTP_DISABLE_REDIRECTS;
         Require(WinHttpSetOption(request,WINHTTP_OPTION_DISABLE_FEATURE,&disabled,sizeof(disabled)),"Relay authentication policy");
         Require(WinHttpSetOption(request,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,nullptr,0),"Relay WebSocket upgrade");
-        const std::wstring headers=L"x-remote-room: "+Wide(room)+L"\r\nx-remote-token: "+Wide(token)+L"\r\nx-remote-role: "+Wide(role)+L"\r\nx-remote-channel: "+Wide(channel)+L"\r\n";
+        std::wstring headers=L"x-remote-room: "+Wide(room)+L"\r\nx-remote-token: "+Wide(token)+L"\r\nx-remote-role: "+Wide(role)+L"\r\nx-remote-channel: "+Wide(channel)+L"\r\n";
+        if(!hostKey.empty())headers+=L"x-remote-host-key: "+Wide(hostKey)+L"\r\n";
         Require(WinHttpAddRequestHeaders(request,headers.c_str(),static_cast<DWORD>(headers.size()),WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE),"Relay capability headers");
         ResetEvent(httpDone);
         Require(WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,context),"Relay HTTPS request send");Wait(httpDone,5000,"Relay HTTPS request completion");
@@ -213,10 +215,10 @@ public:
 };
 }
 
-std::unique_ptr<TitanTransport::ByteStream> OpenRelay(std::wstring_view url,std::string_view room,std::string_view token,std::string_view role,std::string_view channel,std::function<bool()> cancelled) {
+std::unique_ptr<TitanTransport::ByteStream> OpenRelay(std::wstring_view url,std::string_view room,std::string_view token,std::string_view role,std::string_view channel,std::function<bool()> cancelled,std::string_view hostKey) {
     auto state=std::make_shared<State>();
     state->cancelled=std::move(cancelled);
-    try {state->Initialize(url,room,token,role,channel);return std::make_unique<RelayStream>(std::move(state));}
+    try {state->Initialize(url,room,token,role,channel,hostKey);return std::make_unique<RelayStream>(std::move(state));}
     catch(...) {state->Close();throw;}
 }
 }

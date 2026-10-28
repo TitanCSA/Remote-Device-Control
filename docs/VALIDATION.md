@@ -4,13 +4,14 @@ Validation performed on 28 October 2026. This is an initial release, not a guara
 
 ## Automated checks
 
-- Release builds use Windows x64, C++17, static MSVC runtime, `/W4 /WX`, Control Flow Guard, ASLR and DEP. Four native test suites pass.
-- Core: 71,886 assertions covering pinned TLS, identity persistence, bounded messages, credentials, protocol validation and relay video pacing under a simulated producer load.
+- Release builds use Windows x64, C++17, static MSVC runtime, `/W4 /WX`, Control Flow Guard, ASLR and DEP. Six native test suites pass.
+- Core: 71,891 assertions covering pinned TLS, identity persistence, bounded messages, credentials, protocol validation and relay video pacing under a simulated producer load. A real TLS response delayed beyond five seconds verifies approval waits honor their longer timeout; closing also interrupts a long read.
 - Input: 131,359 assertions covering both HID descriptors, report encoding, key modifiers, mouse coordinates, transitions and invalid inputs.
 - Capture: 257 checks covering bounded JPEG decoding, malformed data, dimensions and encode/decode round trips.
-- Installer: 34 checks covering command parsing and ownership checks. The embedded Vdevice setup, host and removal helper are checked against the exact build inputs.
-- Core, input and image tests also pass with AddressSanitizer using MSVC 14.44.35207 and its matching runtime. This covers these user-mode tests, not arbitrary kernel or graphics stacks.
-- The relay has 17 automated tests. Native Internet fixtures additionally exercise independent input/video channels, large transfers, refused tokens, peer disconnect and cancellation of pending connections.
+- Installer/configuration: 3,028 checks covering ownership, protected legacy migration, full TLS identity preservation, access settings, malformed/truncated data and self-certifying public room identities. The embedded Vdevice setup, host and removal helper are checked against the exact build inputs.
+- LAN discovery: 558 checks covering packet sizes, nonce binding, UTF-8, scope, expiry and host-count bounds. Public directory: 20 native codec/bounds/cancellation checks.
+- All six suites also pass with AddressSanitizer using MSVC 14.44.35207 and its matching runtime. This covers these user-mode tests, not arbitrary kernel or graphics stacks.
+- The relay/directory has 29 automated tests passing on Windows and Linux. These cover consent-only public publication, hidden protected hosts, private-owner isolation, expiry/restart ownership, duplicate viewers, malformed requests and admission bounds. Native Internet fixtures additionally exercise independent input/video channels, large transfers, refused tokens, peer disconnect and cancellation of pending connections.
 - A public-source-only checkout builds without private laboratory helpers or driver source. Building the complete installer additionally requires the documented upstream Vdevice console setup.
 
 ## Windows VM checks
@@ -26,6 +27,8 @@ Sequential LAN/relay reconnects pass. Deliberately disconnecting while a key and
 Owned-package uninstall was exercised through its requested normal restart and final cleanup. Windows then reports no host/Vdevice services, own firewall rule, configuration, Apps registration or owned application directory. Windows audit and setup logs are intentionally retained.
 
 The shared-driver case also passes: keeping Vdevice during removal, reinstalling the host over that existing driver, then uninstalling again preserves Vdevice while removing the host's files, service and configuration.
+
+Public access was exercised with the actual Internet directory and Windows 11 target. No virtual HID device exists while approval is pending. Clicking No and ignoring a request both prevent access. Clicking Yes enables real desktop/control traffic; a second pending or active controller is refused. Automatic mode also connects without a code through both LAN transport and the Internet relay, and disconnect neutralizes held input and removes the virtual devices.
 
 The laboratory base contained obsolete third-party keyboard/mouse mapper packages. They prevented Windows from starting the virtual HID children even though USB enumeration succeeded. Removing those packages in the disposable VM restored input. The application now checks its exact owned HID class children during startup and reports their PnP problem/service if they fail; it does not remove other drivers.
 

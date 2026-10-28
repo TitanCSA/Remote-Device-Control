@@ -5,9 +5,11 @@
 #include <iostream>
 #include <exception>
 #include <array>
+#include <atomic>
+#include <chrono>
 using namespace RemoteControl;
 int main(){try{
- size_t assertions=0;auto check=[&](bool value){++assertions;if(!value)throw std::runtime_error("Core assertion failed.");};
+ std::atomic<size_t> assertions{0};auto check=[&](bool value){++assertions;if(!value)throw std::runtime_error("Core assertion failed.");};
  RelayVideoPacing pacing;check(pacing.WaitMilliseconds(0)==0);pacing.Sent(600000,100);check(pacing.WaitMilliseconds(100)>1000&&pacing.WaitMilliseconds(100)<1100);check(pacing.WaitMilliseconds(5000)==0);
  pacing.Sent(30000,5000);check(pacing.WaitMilliseconds(5000)>=50&&pacing.WaitMilliseconds(5000)<60);check(pacing.WaitMilliseconds(6000)==0);
  // A long idle interval cannot accumulate a burst of old-frame credit.
@@ -22,9 +24,19 @@ int main(){try{
  for(auto text:{L"",L"invalid",L"RDC1;x;0;x;x;x;x;x",L"RDC1;example/../;48761;pin;secret;room;token;wss://host"}){bool refused=false;try{ParsePairing(text);}catch(...){refused=true;}check(refused);}
  for(int i=-100;i<70000;++i){Input value;value.x=i;check(ValidInput(value)==(i>=0&&i<=65535));}
  TitanTransport::Runtime runtime;TitanTransport::Identity original;auto exported=original.Export();TitanTransport::Identity persisted(exported);check(original.Fingerprint()==persisted.Fingerprint());
- uint16_t port=0;SOCKET listener=TitanTransport::Listen("127.0.0.1",0,&port);std::exception_ptr failure;
- std::thread server([&]{try{SOCKET socket=accept(listener,nullptr,nullptr);Link link(socket);link.channel.HandshakeServer(persisted);auto packet=link.Receive();check(packet.type==Message::Auth&&Text(packet)==c.secret);link.Send(Message::Grant,c.secret);auto payload=link.Receive();check(payload.data.size()==70001);link.Send(Message::Inputs,payload.data,payload.sequence);}catch(...){failure=std::current_exception();}});
- {Link viewer(TitanTransport::Connect("127.0.0.1",port));viewer.channel.HandshakeClient(original.Fingerprint());viewer.Send(Message::Auth,c.secret);auto reply=viewer.Receive();check(reply.type==Message::Grant&&Text(reply)==c.secret);std::vector<uint8_t> bytes(70001);for(size_t i=0;i<bytes.size();++i)bytes[i]=static_cast<uint8_t>(i);viewer.Send(Message::Inputs,bytes,9);auto echo=viewer.Receive();check(echo.sequence==9&&echo.data==bytes);}
- server.join();closesocket(listener);if(failure)std::rethrow_exception(failure);
- std::cout<<"PASS "<<assertions<<" core assertions. No driver, capture or real host connection.\n";return 0;
+ uint16_t port=0;SOCKET listener=TitanTransport::Listen("127.0.0.1",0,&port);std::exception_ptr failure,clientFailure;std::atomic<bool> serverObservedClose{false};
+ std::thread server([&]{try{SOCKET socket=accept(listener,nullptr,nullptr);Link link(socket);link.channel.HandshakeServer(persisted);auto packet=link.Receive();check(packet.type==Message::Auth&&Text(packet)==c.secret);link.Send(Message::Grant,c.secret);auto payload=link.Receive();check(payload.data.size()==70001);link.Send(Message::Inputs,payload.data,payload.sequence);
+  // Approval/status messages legitimately arrive after five seconds. This
+  // real socket/TLS wait regresses the former hidden SO_RCVTIMEO=5000 cap.
+  std::this_thread::sleep_for(std::chrono::milliseconds(5500));link.Send(Message::Pending,std::string("Delayed local approval fixture"));
+  const auto closeWait=GetTickCount64();try{(void)link.Receive(15000);}catch(const std::exception&){serverObservedClose=GetTickCount64()-closeWait<2000;}
+ }catch(...){failure=std::current_exception();}});
+ try{Link viewer(TitanTransport::Connect("127.0.0.1",port));viewer.channel.HandshakeClient(original.Fingerprint());viewer.Send(Message::Auth,c.secret);auto reply=viewer.Receive();check(reply.type==Message::Grant&&Text(reply)==c.secret);std::vector<uint8_t> bytes(70001);for(size_t i=0;i<bytes.size();++i)bytes[i]=static_cast<uint8_t>(i);viewer.Send(Message::Inputs,bytes,9);auto echo=viewer.Receive();check(echo.sequence==9&&echo.data==bytes);
+  const auto began=GetTickCount64();auto delayed=viewer.Receive(7000);check(delayed.type==Message::Pending&&Text(delayed)=="Delayed local approval fixture");check(GetTickCount64()-began>=5000);
+  std::atomic<bool> started{false};std::exception_ptr cancelled;
+  std::thread waiting([&]{started=true;try{(void)viewer.Receive(30000);}catch(...){cancelled=std::current_exception();}});
+  while(!started)std::this_thread::yield();std::this_thread::sleep_for(std::chrono::milliseconds(100));const auto closing=GetTickCount64();viewer.Close();waiting.join();check(cancelled!=nullptr);check(GetTickCount64()-closing<1500);
+ }catch(...){clientFailure=std::current_exception();}
+ closesocket(listener);server.join();if(clientFailure)std::rethrow_exception(clientFailure);if(failure)std::rethrow_exception(failure);check(serverObservedClose);
+ std::cout<<"PASS "<<assertions.load()<<" core assertions. No driver, capture or real host connection.\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

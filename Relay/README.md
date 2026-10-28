@@ -25,13 +25,16 @@ Only a loopback TCP peer can supply the forwarded address to this service.
 Routes:
 
 - `GET /remote-device-control/health`: protocol and bounded-payload status only.
+- `GET /remote-device-control/hosts`: public metadata for explicitly opted-in, live hosts; protected hosts never appear. Records expire after twelve seconds and responses are not cached.
+- `POST /remote-device-control/hosts` and `DELETE /remote-device-control/hosts?room=...`: publication/removal requires the private `x-remote-owner` credential. It must match the live relay host's self-certifying room. This credential is distinct from the public viewer relay capability and end-to-end private connection secret.
 - `WS /remote-device-control/relay`: exactly four capability headers:
   `x-remote-room` (32 lowercase hex characters), `x-remote-token` (64 lowercase
   hex characters), `x-remote-role` (`host` or `viewer`) and `x-remote-channel`
   (`video` or `input`). No URL query strings or browser `Origin` are accepted.
 
-The relay capability is **separate from the end-to-end pairing secret**. Store
-it with the protected host configuration and share it only in the pairing code.
+New hosts additionally use `x-remote-host-key` for the private host-owner proof. A public room is the first 32 lowercase hex characters of SHA-256 over that 64-character owner credential. Only a proven owner can register its host role or replace an unowned legacy reservation. The viewer's public capability cannot publish another fingerprint or become the host owner. Legacy protected hosts retain their existing four-header registration.
+
+The relay capability is **separate from the end-to-end pairing secret**. Protected hosts share it only in their private pairing code. Explicitly public hosts publish their viewer capability so code-free clients can connect; their private owner proof stays on the host.
 A host must register a channel before a viewer joins it. A matching pair receives
 the binary bootstrap marker `RDC-READY-1`, then exchanges opaque binary data.
 Duplicate roles are refused instead of evicting an established peer. Disconnect

@@ -12,10 +12,12 @@ from dataclasses import dataclass, field
 import hashlib
 import hmac
 import ipaddress
+import json
 import re
 import time
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
 READY = b"RDC-READY-1"
 HEX32 = re.compile(r"^[0-9a-f]{32}$")
@@ -23,6 +25,8 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ROLES = frozenset(("host", "viewer"))
 CHANNELS = frozenset(("video", "input"))
 HEADER_NAMES = frozenset(("x-remote-room", "x-remote-token", "x-remote-role", "x-remote-channel"))
+HOST_KEY = "x-remote-host-key"
+RELAY_URL = "wss://licences.configcsa.com/remote-device-control/relay"
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ class Room:
     next_video: float = 0.0
     next_input: float = 0.0
     bandwidth_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    host_key_hash: bytes | None = field(default=None, repr=False)
 
     @property
     def active(self):
@@ -99,6 +104,16 @@ class Registry:
         self.connections: dict[str, int] = {}
         self.attempts: dict[str, deque[float]] = {}
         self.lock = asyncio.Lock()
+        self.public_hosts: dict[str, tuple[dict, float]] = {}
+        self.owner_leases: dict[str, tuple[bytes, float]] = {}
+
+    def _prune_public(self, now):
+        for identifier, (_, expires) in tuple(self.public_hosts.items()):
+            if expires <= now:
+                del self.public_hosts[identifier]
+        for identifier, (_, expires) in tuple(self.owner_leases.items()):
+            if expires <= now and identifier not in self.rooms:
+                del self.owner_leases[identifier]
 
     def _attempt(self, ip, now):
         for key in tuple(self.attempts):
@@ -123,7 +138,8 @@ class Registry:
         if sum(len(key) + len(value) for key, value in socket.scope.get("headers", ())) > 4096:
             raise Refused()
         remote_headers = {key.lower() for key, _ in socket.scope.get("headers", ()) if key.lower().startswith(b"x-remote-")}
-        if remote_headers != {name.encode() for name in HEADER_NAMES}:
+        base = {name.encode() for name in HEADER_NAMES}
+        if remote_headers not in (base, base | {HOST_KEY.encode()}):
             raise Refused()
         values = {}
         for name in HEADER_NAMES:
@@ -134,16 +150,43 @@ class Registry:
         room, token, role, channel = (values[name] for name in ("x-remote-room", "x-remote-token", "x-remote-role", "x-remote-channel"))
         if not HEX32.fullmatch(room) or not HEX64.fullmatch(token) or role not in ROLES or channel not in CHANNELS:
             raise Refused()
-        return room, hashlib.sha256(token.encode("ascii")).digest(), role, channel
+        host_keys = socket.headers.getlist(HOST_KEY)
+        if host_keys and (len(host_keys) != 1 or role != "host" or not HEX64.fullmatch(host_keys[0])):
+            raise Refused()
+        host_hash = hashlib.sha256(host_keys[0].encode("ascii")).digest() if host_keys else None
+        return room, hashlib.sha256(token.encode("ascii")).digest(), role, channel, host_hash
 
     async def join(self, socket, ip):
         async with self.lock:
             now = time.monotonic()
+            self._prune_public(now)
             self._attempt(ip, now)
-            identifier, token_hash, role, channel = self._parameters(socket)
+            identifier, token_hash, role, channel, host_hash = self._parameters(socket)
+            # Public room ownership is self-certifying. Unlike a timed cache,
+            # this proof remains valid across disconnections and relay restarts.
+            # The public viewer capability cannot mint another host for this ID.
+            if host_hash is not None and not hmac.compare_digest(identifier, host_hash.hex()[:32]):
+                raise Refused()
+            lease = self.owner_leases.get(identifier)
+            if role == "host" and lease and (host_hash is None or not hmac.compare_digest(lease[0], host_hash)):
+                raise Refused()
+            room = self.rooms.get(identifier)
+            if role == "host" and host_hash is not None and room and room.host_key_hash is None:
+                # A recorded public capability can occupy an unkeyed legacy
+                # slot after a restart. Only the cryptographically proven room
+                # owner may retire that slot. Never evict a keyed/live owner.
+                for old in tuple(room.peers.values()):
+                    old.closed.set()
+                    amount = self.connections.get(old.ip, 0) - 1
+                    if amount > 0:
+                        self.connections[old.ip] = amount
+                    else:
+                        self.connections.pop(old.ip, None)
+                room.peers.clear()
+                del self.rooms[identifier]
+                room = None
             if self.connections.get(ip, 0) >= self.limits.connections_per_ip:
                 raise Refused(1013)
-            room = self.rooms.get(identifier)
             if room and room.expires <= now:
                 for old in room.peers.values():
                     old.closed.set()
@@ -154,9 +197,18 @@ class Registry:
                 if len(self.rooms) >= self.limits.rooms:
                     raise Refused(1013)
                 room = Room(identifier, token_hash, now + self.limits.lifetime_seconds)
+                if host_hash is not None:
+                    if not lease and len(self.owner_leases) >= 64:
+                        raise Refused(1013)
+                    room.host_key_hash = host_hash
+                    self.owner_leases[identifier] = (host_hash, now + 60)
                 self.rooms[identifier] = room
             elif not hmac.compare_digest(room.token_hash, token_hash):
                 raise Refused()
+            if role == "host" and room.host_key_hash != host_hash:
+                raise Refused()
+            if role == "host" and host_hash is not None:
+                self.owner_leases[identifier] = (host_hash, now + 60)
             if (role, channel) in room.peers:
                 raise Refused()
             if role == "viewer":
@@ -191,6 +243,46 @@ class Registry:
             if not room.peers and self.rooms.get(room.identifier) is room:
                 del self.rooms[room.identifier]
 
+    async def list_public(self):
+        async with self.lock:
+            self._prune_public(time.monotonic())
+            result = []
+            for identifier, (metadata, _) in self.public_hosts.items():
+                room = self.rooms.get(identifier)
+                if not room or not any(role == "host" for role, _ in room.peers):
+                    continue
+                item = dict(metadata)
+                item["busy"] = item["busy"] or room.active
+                result.append(item)
+            return result
+
+    async def publish(self, metadata, owner):
+        async with self.lock:
+            now = time.monotonic()
+            self._prune_public(now)
+            identifier = metadata["room"]
+            room = self.rooms.get(identifier)
+            owner_hash = hashlib.sha256(owner.encode("ascii")).digest()
+            if (not hmac.compare_digest(identifier, owner_hash.hex()[:32])
+                    or not room or not room.host_key_hash or not hmac.compare_digest(room.host_key_hash, owner_hash)
+                    or not hmac.compare_digest(room.token_hash, hashlib.sha256(metadata["relay_token"].encode("ascii")).digest())
+                    or not any(role == "host" for role, _ in room.peers)):
+                return False
+            if identifier not in self.public_hosts and len(self.public_hosts) >= 64:
+                return False
+            self.owner_leases[identifier] = (owner_hash, now + 60)
+            self.public_hosts[identifier] = (dict(metadata), now + 12)
+            return True
+
+    async def remove_public(self, identifier, owner):
+        async with self.lock:
+            self._prune_public(time.monotonic())
+            lease = self.owner_leases.get(identifier)
+            if not lease or not hmac.compare_digest(lease[0], hashlib.sha256(owner.encode("ascii")).digest()):
+                return False
+            self.public_hosts.pop(identifier, None)
+            return True
+
     async def bandwidth(self, peer, count):
         room = peer.room
         rate = self.limits.video_bytes_per_second if peer.channel == "video" else self.limits.input_bytes_per_second
@@ -213,6 +305,50 @@ def create_app(limits=Limits()):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     registry = Registry(limits)
     app.state.registry = registry
+
+    @app.api_route("/remote-device-control/hosts", methods=["GET", "POST", "DELETE"])
+    async def directory(request: Request):
+        def reply(data, status=200):
+            return JSONResponse(data, status_code=status, headers={"Cache-Control": "no-store"})
+        if request.method == "GET":
+            if request.url.query:
+                return reply({"error": "invalid_request"}, 400)
+            return reply({"hosts": await registry.list_public()})
+        owners = request.headers.getlist("x-remote-owner")
+        if len(owners) != 1 or not HEX64.fullmatch(owners[0]) or request.headers.get("origin") is not None:
+            return reply({"error": "owner_required"}, 403)
+        if request.method == "DELETE":
+            identifiers = request.query_params.getlist("room")
+            if set(request.query_params) != {"room"} or len(identifiers) != 1 or not HEX32.fullmatch(identifiers[0]):
+                return reply({"error": "invalid_request"}, 400)
+            removed = await registry.remove_public(identifiers[0], owners[0])
+            return reply({"ok": True} if removed else {"error": "owner_refused"}, 200 if removed else 403)
+        if request.url.query:
+            return reply({"error": "invalid_request"}, 400)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 4096:
+                return reply({"error": "request_too_large"}, 413)
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate field")
+                result[key] = value
+            return result
+        try:
+            metadata = json.loads(raw, object_pairs_hook=unique)
+            if not isinstance(metadata, dict) or set(metadata) != {"name", "room", "pin", "relay_token", "relay", "busy", "available", "require_approval"}:
+                raise ValueError("invalid fields")
+            if (not isinstance(metadata["name"], str) or not 1 <= len(metadata["name"]) <= 64 or not metadata["name"].isprintable()
+                    or any(not isinstance(metadata[key], str) or not pattern.fullmatch(metadata[key]) for key, pattern in (("room", HEX32), ("pin", HEX64), ("relay_token", HEX64)))
+                    or metadata["relay"] != RELAY_URL or any(type(metadata[key]) is not bool for key in ("busy", "available", "require_approval"))):
+                raise ValueError("invalid values")
+        except (ValueError, TypeError, UnicodeError):
+            return reply({"error": "invalid_request"}, 400)
+        accepted = await registry.publish(metadata, owners[0])
+        return reply({"ok": True} if accepted else {"error": "owner_refused"}, 200 if accepted else 403)
 
     @app.get("/remote-device-control/health")
     async def health():

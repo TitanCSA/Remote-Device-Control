@@ -56,7 +56,13 @@ struct Client::State {
  void Run(Pairing p,unsigned mode){try{
   bool relay=mode==2;std::shared_ptr<Link> auth;
   if(mode==0){try{auth=Open(p,false,"input");}catch(...){if(stop)throw;relay=true;}}
-  if(!auth)auth=Open(p,relay,"input");auth->Send(Message::Auth,p.secret);auto grant=auth->Receive(30000);ThrowIfError(grant);if(grant.type!=Message::Grant||!TitanTransport::IsSecret(Text(grant)))throw std::runtime_error("Invalid authenticated session grant.");
+  if(!auth)auth=Open(p,relay,"input");auth->Send(Message::Auth,p.secret);Packet grant{};
+  const auto grantDeadline=GetTickCount64()+90000;unsigned notices=0;
+  for(;;){const auto now=GetTickCount64();if(now>=grantDeadline)throw std::runtime_error("Host approval and preparation timed out.");grant=auth->Receive(static_cast<uint32_t>((std::min)(grantDeadline-now,ULONGLONG(30000))));ThrowIfError(grant);
+   if(grant.type!=Message::Pending)break;
+   if(++notices>3||grant.data.empty()||grant.data.size()>512)throw std::runtime_error("Invalid host preparation status.");const auto text=Text(grant);(void)Wide(text);{std::lock_guard<std::mutex> lock(mutex);info.status="Connecting: "+text;}Notify();
+  }
+  if(grant.type!=Message::Grant||!TitanTransport::IsSecret(Text(grant)))throw std::runtime_error("Invalid authenticated session grant.");
   auto images=Open(p,relay,"video");images->Send(Message::VideoAuth,p.secret+Text(grant));
   {std::lock_guard<std::mutex> lock(mutex);info.connected=true;info.route=relay?"Internet relay / end-to-end TLS":"Direct LAN / pinned TLS";info.status="Connected. Click the desktop to send keyboard and mouse.";}Notify();
   sender=std::thread([this]{Sender();});ackReader=std::thread([this]{Acks();});FrameCodec codec;uint64_t previous=0,window=GetTickCount64(),frames=0;
@@ -70,6 +76,7 @@ struct Client::State {
 Client::Client(std::function<void()> changed):state_(std::make_unique<State>(std::move(changed))){}
 Client::~Client(){Stop();}
 void Client::Start(Pairing pairing,unsigned mode){
+ if(pairing.noCode){if(!TitanTransport::ConstantTimeEqual(pairing.secret,OpenAccessSecret))throw std::runtime_error("Invalid public host connection parameters.");if(pairing.relay.empty())mode=1;}
  wchar_t localRoom[64]{};DWORD size=sizeof(localRoom);if(RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\TitanCSA\\RemoteDeviceControl",L"HostRoom",RRF_RT_REG_SZ|RRF_SUBKEY_WOW6464KEY,nullptr,localRoom,&size)==ERROR_SUCCESS&&TitanTransport::ConstantTimeEqual(Utf8(localRoom),pairing.room))throw std::runtime_error("Connecting this viewer to its own installed host is refused to prevent keyboard/mouse feedback.");
  Stop();state_->stop=false;{std::lock_guard<std::mutex> lock(state_->mutex);state_->info.status="Connecting and preparing the signed-in desktop…";state_->latest.reset();state_->sentTimes.fill(0);}state_->Notify();state_->supervisor=std::thread([s=state_.get(),pairing=std::move(pairing),mode]()mutable{s->Run(std::move(pairing),mode);});}
 void Client::Stop()noexcept{state_->Stop();}

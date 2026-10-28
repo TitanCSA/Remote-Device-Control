@@ -9,7 +9,7 @@ $args+=('-DVDEVICE_SETUP_FILE='+$(if($hasPayload){[IO.Path]::GetFullPath($Vdevic
 & cmake @args
 if($LASTEXITCODE){throw 'CMake configuration failed'}
 $buildArgs=@('--build',$build,'--config','Release','--parallel','2')
-if($TestsOnly){$buildArgs+=@('--target','CoreTests','InputTests','CaptureTests');if($hasPayload){$buildArgs+='SetupTests'}}
+if($TestsOnly){$buildArgs+=@('--target','CoreTests','InputTests','CaptureTests','DiscoveryTests','DirectoryTests','SetupTests')}
 & cmake @buildArgs
 if($LASTEXITCODE){throw 'C++ compilation failed'}
 & ctest --test-dir $build -C Release --output-on-failure

@@ -14,5 +14,5 @@ namespace RemoteControl {
 // waiting, including initial peer pairing, so service shutdown need not wait20s.
 std::unique_ptr<TitanTransport::ByteStream> OpenRelay(
     std::wstring_view wssUrl,std::string_view room,std::string_view token,
-    std::string_view role,std::string_view channel,std::function<bool()> cancelled={});
+    std::string_view role,std::string_view channel,std::function<bool()> cancelled={},std::string_view hostKey={});
 }

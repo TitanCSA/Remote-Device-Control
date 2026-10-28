@@ -5,7 +5,7 @@
 #include <mutex>
 #include <stdexcept>
 namespace RemoteControl {
-enum class Message:uint32_t {Auth=1,Grant=2,Inputs=3,Ack=4,VideoAuth=5,Video=6,Error=7,KeepAlive=8};
+enum class Message:uint32_t {Auth=1,Grant=2,Inputs=3,Ack=4,VideoAuth=5,Video=6,Error=7,KeepAlive=8,Pending=9};
 struct Packet {Message type;uint64_t sequence=0;std::vector<uint8_t> data;};
 struct WireHeader {uint32_t magic=0x31434452,version=1,type=0,size=0;uint64_t sequence=0;};
 static_assert(sizeof(WireHeader)==24);
@@ -20,7 +20,7 @@ public:
  }
  void Send(Message type,const std::vector<uint8_t>& data,uint64_t sequence=0){Send(type,data.data(),data.size(),sequence);}
  void Send(Message type,const std::string& data,uint64_t sequence=0){Send(type,data.data(),data.size(),sequence);}
- Packet Receive(uint32_t timeout=5000){WireHeader header{};channel.Receive(&header,sizeof(header),timeout);if(header.magic!=0x31434452||header.version!=1||header.type<1||header.type>8||header.size>MaxFrameBytes+64)throw std::runtime_error("Invalid remote packet header.");Packet p{static_cast<Message>(header.type),header.sequence,{}};p.data.resize(header.size);if(header.size)channel.Receive(p.data.data(),p.data.size(),timeout);return p;}
+ Packet Receive(uint32_t timeout=5000){WireHeader header{};channel.Receive(&header,sizeof(header),timeout);if(header.magic!=0x31434452||header.version!=1||header.type<1||header.type>9||header.size>MaxFrameBytes+64)throw std::runtime_error("Invalid remote packet header.");Packet p{static_cast<Message>(header.type),header.sequence,{}};p.data.resize(header.size);if(header.size)channel.Receive(p.data.data(),p.data.size(),timeout);return p;}
  void Close()noexcept{channel.Close();}
 };
 inline std::string Text(const Packet& p){if(p.data.size()>2048)throw std::runtime_error("Invalid remote message size.");return {reinterpret_cast<const char*>(p.data.data()),p.data.size()};}

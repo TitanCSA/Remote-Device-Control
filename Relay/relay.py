@@ -341,7 +341,7 @@ def create_app(limits=Limits()):
             metadata = json.loads(raw, object_pairs_hook=unique)
             if not isinstance(metadata, dict) or set(metadata) != {"name", "room", "pin", "relay_token", "relay", "busy", "available", "require_approval"}:
                 raise ValueError("invalid fields")
-            if (not isinstance(metadata["name"], str) or not 1 <= len(metadata["name"]) <= 64 or not metadata["name"].isprintable()
+            if (not isinstance(metadata["name"], str) or not 1 <= len(metadata["name"]) <= 64 or len(metadata["name"].encode("utf-8")) > 128 or not metadata["name"].isprintable()
                     or any(not isinstance(metadata[key], str) or not pattern.fullmatch(metadata[key]) for key, pattern in (("room", HEX32), ("pin", HEX64), ("relay_token", HEX64)))
                     or metadata["relay"] != RELAY_URL or any(type(metadata[key]) is not bool for key in ("busy", "available", "require_approval"))):
                 raise ValueError("invalid values")

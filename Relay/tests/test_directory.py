@@ -69,6 +69,15 @@ class DirectoryHTTPTests(unittest.TestCase):
             self.assertEqual(client.post(HOSTS, json=metadata(), headers={"x-remote-owner": OWNER, "origin": "https://example.invalid"}).status_code, 403)
             self.assertEqual(client.get(HOSTS + "?room=" + ROOM).status_code, 400)
             self.assertEqual(client.delete(HOSTS + "?room=" + ROOM + "&room=" + ROOM, headers={"x-remote-owner": OWNER}).status_code, 400)
+    def test_unicode_names_cannot_exceed_native_viewer_byte_limit(self):
+        with TestClient(self.make()) as client:
+            with client.websocket_connect(URL, headers=headers()):
+                item = metadata(); item["name"] = "é" * 64
+                self.assertEqual(client.post(HOSTS, json=item, headers={"x-remote-owner": OWNER}).status_code, 200)
+                self.assertEqual(len(client.get(HOSTS).json()["hosts"][0]["name"].encode("utf-8")), 128)
+                item["name"] = "😀" * 33
+                self.assertEqual(client.post(HOSTS, json=item, headers={"x-remote-owner": OWNER}).status_code, 400)
+                self.assertEqual(client.get(HOSTS).json()["hosts"][0]["name"], "é" * 64)
     def test_busy_catalog_does_not_evict_first_viewer(self):
         with TestClient(self.make()) as client:
             with client.websocket_connect(URL, headers=headers()) as host:

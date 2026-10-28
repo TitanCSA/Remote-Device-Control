@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 cmake_policy(SET CMP0091 NEW)
-project(RemoteDeviceControl VERSION 0.2.0 LANGUAGES CXX RC)
+project(RemoteDeviceControl VERSION 0.2.1 LANGUAGES CXX RC)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
  message(FATAL_ERROR "Use Windows x64 and Visual Studio 2022 Desktop C++.")
 endif()

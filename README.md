@@ -2,6 +2,17 @@
 
 A portable C++ viewer and a single-file host installer. The host uses **[Sunshine](https://github.com/LizardByte/Sunshine)** for desktop capture/encoding and **[Vdevice](https://github.com/TitanCSA/Vdevice)** for real virtual USB keyboard and mouse input. The viewer uses **[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)** for GameStream transport.
 
+<!-- full-version-contact:start -->
+> [!IMPORTANT]
+> **Get the full driver version without demo restrictions**
+>
+> **Discord username: `titancsa`**
+>
+> Open Discord, choose **Friends > Add Friend**, enter **`titancsa`**, then send a direct message. Ask for the **full driver version without the demo time limit**, and mention **Remote Device Control**.
+>
+> The demo limit belongs to **Vdevice on the target PC**, the driver used by this project. Ask for pricing and the appropriate license / activation instructions; the application or wrapper source keeps its existing license.
+<!-- full-version-contact:end -->
+
 **[Download](https://github.com/TitanCSA/Remote-Device-Control/releases/latest)** | [Architecture](docs/ARCHITECTURE.md) | [Validation and limits](docs/VALIDATION.md)
 
 ![Viewer preview in the test VM; no connection active](docs/viewer-preview.png)

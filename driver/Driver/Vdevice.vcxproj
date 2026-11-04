@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{DB8AE991-2F0E-4CA6-B91A-DC3D303532EE}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Driver</ConfigurationType><DriverType>KMDF</DriverType><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset><TargetVersion>Windows10</TargetVersion><_NT_TARGET_VERSION>0xA000008</_NT_TARGET_VERSION><KmdfVersion>1.31</KmdfVersion><DriverTargetPlatform>Desktop</DriverTargetPlatform><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(MSBuildThisFileDirectory)..\bin\Driver\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\obj\Driver\</IntDir><TargetName>Vdevice</TargetName><SignMode>Off</SignMode><EnableInf2cat>false</EnableInf2cat><Inf2CatUseLocalTime>false</Inf2CatUseLocalTime><SkipPackageVerification>true</SkipPackageVerification><SupportsPackaging>false</SupportsPackaging></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km\ude\1.1;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><Optimization>MaxSpeed</Optimization><BufferSecurityCheck>true</BufferSecurityCheck></ClCompile>
+    <Link><AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions><AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\km\x64\ude\1.1;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>udecxstub.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(TrialLabSeconds)'!=''"><ClCompile><PreprocessorDefinitions>VD_LAB_TRIAL_SECONDS=$(TrialLabSeconds);%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="Driver.c" /><Inf Include="Vdevice.inf"><SpecifyDriverVerDirectiveDate>false</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>false</SpecifyDriverVerDirectiveVersion></Inf></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="BuildResidentTrialClock" AfterTargets="Build">
+    <PropertyGroup><ResidentClockOut Condition="'$(ResidentClockOut)'==''">$(MSBuildProjectDirectory)\..\bin\ResidentClock\$(Configuration)\$(TrialLabSeconds)\</ResidentClockOut></PropertyGroup>
+    <MSBuild Projects="$(MSBuildProjectDirectory)\..\TrialClock\TrialClock.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);VCToolsVersion=$(VCToolsVersion);TrialLabSeconds=$(TrialLabSeconds);TargetName=TitanDemoClock;OutDir=$(ResidentClockOut);IntDir=$(ResidentClockOut)obj\" />
+    <Copy SourceFiles="$(ResidentClockOut)TitanDemoClock.sys;$(ResidentClockOut)TitanDemoClock.pdb" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

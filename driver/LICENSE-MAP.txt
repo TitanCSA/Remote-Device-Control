@@ -1,0 +1,43 @@
+Vdevice driver source - file-level license map
+
+Paths below are relative to driver/. Each original source/notice file
+and the generated build wrapper/README is classified once.
+
+LicenseRef-Titan-Evaluation-1.0 denotes the separate Titan Demo Driver
+Source Evaluation License, version 1.0, supplied in LICENSE.txt.
+Only files explicitly marked with that identifier receive those terms.
+The repository root LICENSE and existing user-mode/SDK grants are unchanged.
+
+MIT and MS-PL rows retain their complete prior permissions. The custom
+evaluation license adds no production-use, commercial-use, modification,
+redistribution, timer-preservation or authorization-preservation restriction
+to MIT/MS-PL rows. This exception applies to the whole identified file,
+including interleaved Titan changes in a sample-derived source file.
+
+Retained-Notice rows are attribution/license records: keep them intact;
+the custom evaluation terms do not narrow the licenses they reproduce.
+This map and THIRD-PARTY-LICENSES/ may be reproduced with the source.
+
+Complete retained license texts:
+  THIRD-PARTY-LICENSES/MIT-Public-SDK.txt
+
+MIT:
+  Shared/Protocol.h
+    Prior public source: https://github.com/TitanCSA/Vdevice/blob/9737ec2e700be1dc9db0deff14138e21f146b308/Vdevice/Vdevice.cpp
+    Retained complete license: THIRD-PARTY-LICENSES/MIT-Public-SDK.txt
+    Evidence: Wire protocol/validator embedded in the public two-file SDK; 29 substantive source lines retained
+  Shared/Validate.h
+    Prior public source: https://github.com/TitanCSA/Vdevice/blob/9737ec2e700be1dc9db0deff14138e21f146b308/Vdevice/Vdevice.cpp
+    Retained complete license: THIRD-PARTY-LICENSES/MIT-Public-SDK.txt
+    Evidence: Wire protocol/validator embedded in the public two-file SDK; 152 substantive source lines retained
+
+LicenseRef-Titan-Evaluation-1.0:
+  Build.ps1
+  Driver/Driver.c
+  Driver/Vdevice.inf
+  Driver/Vdevice.vcxproj
+  README.md
+  TrialClock/Client.h
+  TrialClock/Clock.c
+  TrialClock/Protocol.h
+  TrialClock/TrialClock.vcxproj

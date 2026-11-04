@@ -71,6 +71,12 @@ Open setup or **Windows Settings > Apps > Remote Device Control**, then choose *
 
 ## Build
 
+The matching Vdevice demo driver source is available; see
+[driver/README.md](driver/README.md) for build instructions and separate
+evaluation-source terms. Those terms apply to Titan-authored driver code. Third-party
+source licenses and existing application/SDK licenses remain applicable. Full/commercial
+implementation and private signing or activation material are excluded.
+
 Install Visual Studio 2022 Desktop C++, a Windows SDK, CMake, Python 3.9+ and Git. Fetch the exact pinned viewer dependencies and build:
 
 ```powershell
@@ -86,6 +92,6 @@ A plain source build produces the portable viewer and host wrapper. Building the
   -EngineCab C:\Build\Engine.cab -EngineManifest C:\Build\Engine.manifest
 ```
 
-See [the engine integration and reproducible source instructions](ThirdParty/Sunshine/README.md). Application code, Vdevice's raw two-file SDK, upstream pins and integration patches are included. **Vdevice kernel source and signing secrets are excluded.**
+See [the engine integration and reproducible source instructions](ThirdParty/Sunshine/README.md). Application code, Vdevice's raw two-file SDK, upstream pins and integration patches are included. **Vdevice demo source and its source-specific license notes are documented in [driver/README.md](driver/README.md). Full/commercial implementation and signing secrets are excluded.**
 
 The combined application is distributed under **GPL-3.0**, with retained upstream MIT/BSD/Apache notices in `licenses/`. The independently supplied Vdevice driver has separate demo binary terms. Use only on computers whose owner has authorized remote control. The software is provided as-is, without a zero-latency, universal-compatibility or bug-free guarantee.

@@ -1,13 +1,16 @@
 # Remote Device Control - direct Windows remote desktop
 
+<!-- simple-start:start -->
+See and control another Windows computer you are allowed to use.
+
+**Start here.** Follow the setup guide on both PCs and connect the viewer to the host on your network.
+<!-- simple-start:end -->
+
 <!-- full-version-contact:start -->
 > [!IMPORTANT]
-> **Get the version without the one-hour demo limit**
+> **Version without the one-hour demo limit**
 >
-> **Discord · `titancsa`**. Open [Discord](https://discord.com/app), choose **Friends → Add Friend**, enter **`titancsa`** and send a message.
-> Mention **Remote-Device-Control** and ask for the full **Vdevice** driver. TitanCSA will share the purchase details privately.
->
-> **FR · Version sans la limite d’une heure.** Ajoute **`titancsa`** sur Discord et envoie le nom du projet. Le lien d’achat est communiqué en privé.
+> In [Discord](https://discord.com/app), choose **Add Friend** and enter **`titancsa`**. Mention **Remote-Device-Control** and ask for the full **Vdevice** driver. Purchase details are sent privately.
 <!-- full-version-contact:end -->
 
 A portable C++ viewer and a single-file host installer. The host uses **[Sunshine](https://github.com/LizardByte/Sunshine)** for desktop capture/encoding and **[Vdevice](https://github.com/TitanCSA/Vdevice)** for real virtual USB keyboard and mouse input. The viewer uses **[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)** for GameStream transport.
@@ -94,5 +97,3 @@ A plain source build produces the portable viewer and host wrapper. Building the
 See [the engine integration and reproducible source instructions](ThirdParty/Sunshine/README.md). Application code, Vdevice's raw two-file SDK, upstream pins and integration patches are included. **Vdevice demo source and its source-specific license notes are documented in [driver/README.md](driver/README.md). Full/commercial implementation and signing secrets are excluded.**
 
 The combined application is distributed under **GPL-3.0**, with retained upstream MIT/BSD/Apache notices in `licenses/`. The independently supplied Vdevice driver has separate demo binary terms. Use only on computers whose owner has authorized remote control. The software is provided as-is, without a zero-latency, universal-compatibility or bug-free guarantee.
-
-

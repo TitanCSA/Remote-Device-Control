@@ -3,7 +3,11 @@
 <!-- simple-start:start -->
 See and control another Windows computer you are allowed to use.
 
-**Start here.** Follow the setup guide on both PCs and connect the viewer to the host on your network.
+[First steps](#first-steps) · [Develop](#build) · [Maintain](https://github.com/TitanCSA/sdk-packages/blob/main/CONTRIBUTING.md)
+
+## First steps
+
+Follow the setup guide on both PCs and connect the viewer to the host on your network.
 <!-- simple-start:end -->
 
 <!-- full-version-contact:start -->

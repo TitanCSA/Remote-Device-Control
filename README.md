@@ -1,5 +1,15 @@
 # Remote Device Control - direct Windows remote desktop
 
+<!-- full-version-contact:start -->
+> [!IMPORTANT]
+> **Get the version without the one-hour demo limit**
+>
+> **Discord · `titancsa`**. Open [Discord](https://discord.com/app), choose **Friends → Add Friend**, enter **`titancsa`** and send a message.
+> Mention **Remote-Device-Control** and ask for the full **Vdevice** driver. TitanCSA will share the purchase details privately.
+>
+> **FR · Version sans la limite d’une heure.** Ajoute **`titancsa`** sur Discord et envoie le nom du projet. Le lien d’achat est communiqué en privé.
+<!-- full-version-contact:end -->
+
 A portable C++ viewer and a single-file host installer. The host uses **[Sunshine](https://github.com/LizardByte/Sunshine)** for desktop capture/encoding and **[Vdevice](https://github.com/TitanCSA/Vdevice)** for real virtual USB keyboard and mouse input. The viewer uses **[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)** for GameStream transport.
 
 **[Download](https://github.com/TitanCSA/Remote-Device-Control/releases/latest)** | [Architecture](docs/ARCHITECTURE.md) | [Validation and limits](docs/VALIDATION.md)
@@ -85,13 +95,4 @@ See [the engine integration and reproducible source instructions](ThirdParty/Sun
 
 The combined application is distributed under **GPL-3.0**, with retained upstream MIT/BSD/Apache notices in `licenses/`. The independently supplied Vdevice driver has separate demo binary terms. Use only on computers whose owner has authorized remote control. The software is provided as-is, without a zero-latency, universal-compatibility or bug-free guarantee.
 
-<!-- full-version-contact:start -->
-> [!IMPORTANT]
-> **Get the full driver version without demo restrictions**
->
-> **Discord username: `titancsa`**
->
-> Open Discord, choose **Friends > Add Friend**, enter **`titancsa`**, then send a direct message. Ask for the **full driver version without the demo time limit**, and mention **Remote Device Control**.
->
-> The demo limit belongs to **Vdevice on the target PC**, the driver used by this project. Ask for pricing and the appropriate license / activation instructions; the application or wrapper source keeps its existing license.
-<!-- full-version-contact:end -->
+
